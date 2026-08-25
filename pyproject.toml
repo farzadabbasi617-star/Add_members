@@ -1,0 +1,12 @@
+[project]
+name = "add-members"
+version = "1.9.14"
+description = "ربات ضد اسکریپت تلگرام — استخراج ممبر، ادد هوشمند ضد بن، و داشبورد مینی‌اپ"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"

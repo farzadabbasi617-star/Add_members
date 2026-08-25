@@ -1,0 +1,74 @@
+# ================================================================
+# Add_members — سرویس اختصاصی این ربات
+#
+# ⚠️ این ربات باید سرویس Render مستقل خودش را داشته باشد.
+#    هر ربات = یک BOT_TOKEN جدا. اگر دو پروسه با یک توکن getUpdates
+#    بزنند، تلگرام هر دو را با «Conflict: terminated by other
+#    getUpdates» می‌شکند.
+# ================================================================
+services:
+  - type: web
+    name: add-members
+    env: python
+    plan: free
+    region: frankfurt
+    branch: main
+    healthCheckPath: /
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      # --- الزامی: از داشبورد Render پر کن، هرگز در گیت کامیت نکن ---
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+
+      # --- رمزنگاری سشن اکانت‌ها ---
+      #
+      # ⚠️ روی سرویسی که از قبل سشن ذخیره‌شده دارد این کلید را عوض نکن؛
+      #    سشن‌های موجود با کلید فعلی نوشته شده‌اند و تغییرش یعنی همهٔ
+      #    اکانت‌ها باید دوباره لاگین کنند — سریع‌ترین راه بن‌شدنشان.
+      - key: SESSION_ENCRYPTION_KEY
+        sync: false
+
+      # --- سرور و مینی‌اپ ---
+      - key: PORT
+        value: '10000'
+      - key: KEEP_ALIVE_INTERVAL
+        value: '280'
+
+      # --- دیتابیس ---
+      - key: DB_POOL_SIZE
+        value: '10'
+
+      # --- موتور ادد (ضد بن) ---
+      - key: MAX_ADD_PER_ACCOUNT
+        value: '1000'
+      - key: CAP_MAX
+        value: '100000'
+      - key: CAP_ULTRA
+        value: '1000'
+      - key: CAP_SAFE
+        value: '1000'
+      - key: GLOBAL_THROTTLE_ENABLED
+        value: 'true'
+      - key: DEFAULT_TARGET_USERNAME
+        sync: false
+
+      # --- دفاع گروه ---
+      # off = هیچ تله‌ای در گروه کاشته نمی‌شود.
+      - key: HONEYPOT_MODE
+        value: 'off'
+
+      # --- لاگینگ ---
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_DIR
+        value: logs

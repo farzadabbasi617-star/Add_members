@@ -1,0 +1,15 @@
+# ================================================================
+# 🐍 Production Dependencies — نسخه‌های دقیق (Reproducible Build)
+# ================================================================
+aiohttp==3.14.3
+base58==2.1.1
+ecdsa==0.19.2
+psutil==7.2.2
+psycopg2-binary==2.9.12
+pyaes==1.6.1
+pyrogram==2.0.106
+pysocks==1.7.1
+python-dotenv==1.2.2
+requests==2.34.2
+tgcrypto==1.2.5
+instaloader==4.15.3

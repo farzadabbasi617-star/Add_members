@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: نصب وابستگی‌ها
+        run: pip install -r requirements-dev.txt
+
+      - name: بررسی سینتکس همه فایل‌ها
+        run: python -m compileall -q .
+
+      - name: تحلیل استاتیک (pyflakes)
+        run: python -m pyflakes config.py add_engine.py logging_setup.py db.py web_app.py account_state.py account_doctor.py callback_router.py step_router.py add_queue.py session_store.py
+
+      - name: اجرای تست‌ها
+        run: python -m pytest tests/ -v
