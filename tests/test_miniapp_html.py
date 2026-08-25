@@ -109,12 +109,20 @@ def test_escape_helper_exists_and_is_used(html):
     )
 
 
-def test_delete_and_invite_buttons_use_data_attributes(html):
-    """هر دو دکمه‌ای که قبلاً HTML را می‌شکستند باید امن شده باشند."""
+def test_delete_button_uses_data_attributes(html):
+    """دکمهٔ حذف اکانت نباید مقدار را داخل onclick بگذارد.
+
+    نام اکانت می‌تواند کوتیشن داشته باشد و HTML را بشکند؛ راه امن،
+    data-attribute به‌همراه یک listener سراسری است.
+
+    دکمهٔ «کپی پیام دعوت» قبلاً هم اینجا بررسی می‌شد، ولی همراه با تب CRM
+    حذف شد — آن بخش به کار اصلی این ربات ربطی نداشت.
+    """
     assert 'data-del-phone="' in html and 'class="btn-del-acc' in html
-    assert 'data-inv-title="' in html and 'class="btn-copy-inv' in html
-    assert "onclick=\"deleteAccount(" not in html
-    assert "onclick=\"copyInviteMsg(" not in html
+    assert 'onclick="deleteAccount(' not in html
+    # بازماندهٔ قابلیت حذف‌شده نباید برگردد
+    assert 'btn-copy-inv' not in html
+    assert 'copyInviteMsg' not in html
 
 
 def test_template_literals_balanced(html):

@@ -94,3 +94,30 @@ def test_session_helpers_survived_the_cleanup():
     """
     assert (ROOT / "session_store.py").exists()
     from session_store import backup_session, ensure_session  # noqa: F401
+
+
+def test_miniapp_has_only_the_four_intended_tabs():
+    """مینی‌اپ باید فقط داشبورد، ادد، استخراج و اکانت‌ها را نشان دهد.
+
+    تب‌های «شکارچی لید» و «CRM» حذف شدند: قیف فروش به استخراج و ادد ممبر
+    ربطی نداشت و فقط نوار پایین را شلوغ می‌کرد.
+    """
+    tabs = set(re.findall(r'id="tab-([a-z]+)"', WEB))
+    assert tabs == {"dashboard", "attack", "scrape", "accounts"}, f"تب‌ها: {sorted(tabs)}"
+
+    navs = set(re.findall(r'id="nav-([a-z]+)"', WEB))
+    assert navs == tabs, f"نوار پایین با تب‌ها نمی‌خواند: {sorted(navs)}"
+
+
+def test_no_dead_javascript_from_removed_tabs():
+    """تابع جاوااسکریپتِ بی‌صاحب یعنی خطای runtime موقع کلیک."""
+    for fn in ("runLeadSearch", "setLeadPreset", "loadCrmLeads", "filterCrmStatus",
+               "updateLeadStatus", "copyInviteMsg"):
+        assert fn not in WEB, f"تابع مربوط به قابلیت حذف‌شده باقی مانده: {fn}"
+
+
+def test_no_dead_lead_api_routes():
+    """endpointای که هندلرش حذف شده، موقع صدا زدن ۵۰۰ می‌دهد."""
+    assert "/api/leads/" not in WEB
+    assert "get_leads_stats_dict" not in WEB
+    assert "get_leads_list_dict" not in WEB
