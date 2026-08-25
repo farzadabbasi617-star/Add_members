@@ -7013,341 +7013,45 @@ class _MsgWrapper:
 
 
 async def _execute_simple_add(q, target_gid, client, phone, members, source_name, add_mode="safe"):
-    """Execute simple add flow with all advanced features"""
-    # قفل نکن
-    # شاخهٔ «اکانت مشغول است» حذف شد: ok_b همیشه True بود، پس این بلوک هرگز
-    # اجرا نمی‌شد و به متغیر تعریف‌نشدهٔ `owner` ارجاع می‌داد. قفل واقعیِ
-    # اکانت در account_state با TTL مدیریت می‌شود.
+    """ادد تک‌اکانتی — همان موتور ادد موازی، فقط با یک ورکر.
+
+    قبلاً این مسیر پیاده‌سازی جداگانهٔ خودش را داشت (`_execute_simple_add_inner`،
+    ۳۲۳ خط) که با گذشت زمان از نسخهٔ موازی عقب افتاده بود. مقایسهٔ خط‌به‌خط
+    نشان داد پنج محافظ در آن **وجود نداشت**:
+
+        • مدیریت PeerFlood
+        • محافظ شکست پیاپی (۲۵ شکست → توقف کل عملیات)
+        • تأیید عضویت واقعی بعد از دعوت
+        • توقف اضطراری از مینی‌اپ
+        • شروع پلکانی
+
+    یعنی کاربری که «ادد تک‌اکانتی» می‌زد، عملاً با محافظت کمتری کار می‌کرد و
+    اکانتش بیشتر در معرض بن بود — دقیقاً برعکس انتظار.
+
+    دو نسخه از یک منطق همیشه از هم دور می‌افتند. پس اینجا فقط یک دیکشنری
+    تک‌عضوی ساخته می‌شود و به موتور اصلی داده می‌شود. موتور هیچ فرضی دربارهٔ
+    «چند اکانت» ندارد؛ با یک ورکر هم درست کار می‌کند.
+
+    `client` دیگر استفاده نمی‌شود: موتور خودش از روی سشن ذخیره‌شده کلاینت
+    می‌سازد. برای سازگاری با فراخوان‌های موجود در امضا نگه داشته شده.
+    """
+    accounts = load_accounts() or {}
+    info = accounts.get(phone) or {}
+
     try:
-        await _execute_simple_add_inner(q, target_gid, client, phone, members, source_name, add_mode)
+        await _execute_parallel_add(
+            q,
+            target_gid,
+            {phone: info},
+            members,
+            source_name,
+            add_mode,
+        )
     finally:
         account_state.release(phone)
         account_state.mark_used(phone)
 
 
-async def _execute_simple_add_inner(q, target_gid, client, phone, members, source_name, add_mode="safe"):
-    """بدنه واقعی ادد تک — قفل اشغال در لایه بیرونی گرفته می‌شود"""
-    from pyrogram.raw.functions.channels import InviteToChannel
-    from pyrogram.raw.functions.contacts import AddContact
-    from pyrogram.raw.types import InputPeerUser
-    from pyrogram.errors import FloodWait, PeerIdInvalid, UserAlreadyParticipant
-    from pyrogram.errors import UserPrivacyRestricted, UserNotMutualContact
-    from pyrogram.errors import ChatAdminRequired, UsersTooMuch
-    
-    prog = q.message
-    added = 0
-    failed = 0
-    skipped = 0
-    errors_detail = {"peer": 0, "privacy": 0, "already": 0, "flood": 0, "channels": 0, "not_joined": 0, "other": 0}
-    members = prefer_addable_members(members)
-    # 🔀 شافل برای max: مثل موازی، هر استارت کاربر تازه
-    if add_mode == "max":
-        import random as _rnd_single
-        _rnd_single.shuffle(members)
-    first_error = ""
-    account_limited = False
-    account_banned = False
-    flood_wait_time = 0
-    start_t = time.time()
-    
-    limits = load_adder_limits()
-    already_added = limits.get(phone, {}).get("added", 0)
-    # فقط تاخیر — بدون سقف روزانه (طبق درخواست: محدودیت نذار)
-    remaining = len(members)  # تا ته ظرفیت لیست، نه سقف مصنوعی
-    
-    # Get target name
-    try:
-        from add_engine import get_target_title as _gtt4, target_username_hint as _tuh4
-        target_name = await _gtt4(client, target_gid, _tuh4(), "گروه مقصد")
-    except:
-        target_name = "گروه مقصد"
-    
-    # Resolve target once
-    try:
-        from add_engine import resolve_target_for_account, target_username_hint
-        target_gid, target_peer, _t = await resolve_target_for_account(
-            client, target_gid, target_username_hint()
-        )
-    except Exception as e:
-        await prog.edit_text(f"❌ گروه مقصد resolve نشد: {e}", reply_markup=InlineKeyboardMarkup([[_sub_back_btn(target="home")[0]]]))
-        return
-    
-    total = min(len(members), remaining)
-    
-    # 📡 آمار زنده برای مینی‌اپ
-    if atk_state_ref is not None:
-        atk_state_ref["add_in_progress"] = True
-        atk_state_ref["live_total"] = total
-        atk_state_ref["live_remaining"] = total
-        atk_state_ref["live_mode"] = "اد تک اکانت"
-        atk_state_ref["live_current_account"] = phone
-    
-    async def upd():
-        try:
-            elapsed = int(time.time() - start_t)
-            m, s = elapsed // 60, elapsed % 60
-            pct = int((added + failed + skipped) * 100 / max(1, total))
-            bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-            spd = int(added / (elapsed / 60)) if elapsed > 30 else 0
-            
-            # Build status text
-            status_text = ""
-            if account_banned:
-                status_text = "\n🚫 اکانت بن شده!"
-            elif account_limited:
-                hours = flood_wait_time // 3600
-                status_text = f"\n⏱️ اکانت محدود ({hours}h)"
-            
-            txt = (
-                f"📂 {source_name} → 👥 {target_name}\n"
-                f"📱 اکانت فعال: {phone}\n"
-                f"{bar} {pct}%\n"
-                f"✅ اضافه: {added} | ⏭ رد: {skipped} | ❌ خطا: {failed}\n"
-                f"⏳ باقی‌مانده: {max(0, total - added - failed - skipped)}\n"
-                f"⏱ {m:02d}:{s:02d} ⚡ {spd}/min\n"
-                f"📊 ظرفیت: {already_added + added}/{MAX_ADD_PER_ACCOUNT}"
-                f"{status_text}"
-            )
-            await prog.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("️⏹️ توقف", callback_data="stop_op")]]))
-        except: pass
-    
-    await upd()
-    
-    # ⚡ ست تکراری‌ها در حافظه — به‌جای ۳ کوئری دیتابیس به ازای هر ممبر (۷۵هزار کوئری در ۲۵هزار اد!)
-    invalidate_blocked_cache()
-    blocked = get_blocked_ids_cached()
-    
-    # Add members one by one
-    for i, member in enumerate(members[:remaining]):
-        uid = member.get("user_id", 0)
-        if uid <= 10000 or uid >= 10**11:
-            skipped += 1
-            continue
-        
-        # 🚫 چک ضد-تکرار در حافظه: قبلاً ادد شده / لفت داده / در لیست ممنوعه → هرگز دوباره ادد نشود
-        if uid in blocked:
-            skipped += 1
-            await asyncio.sleep(0.8)
-            continue
-        
-        # Check stop request
-        if atk_state.get("_stop_requested"):
-            break
-        
-        try:
-            user_peer = None
-            
-            # 🏆 Method 1: Username (BEST - always works if username exists)
-            username = member.get("username", "").strip()
-            if username:
-                try:
-                    # Remove @ if present
-                    clean_username = username.lstrip("@")
-                    user_peer = await client.app.resolve_peer(clean_username)
-                except Exception:
-                    pass  # Fall through to next method
-            
-            # Method 2: Try resolve_peer with user_id (works if in cache)
-            if user_peer is None:
-                try:
-                    user_peer = await client.app.resolve_peer(uid)
-                except Exception:
-                    pass
-            
-            # Method 3: access_hash from member data (if saved during scrape)
-            if user_peer is None and member.get("access_hash"):
-                try:
-                    user_peer = InputPeerUser(user_id=uid, access_hash=int(member["access_hash"]))
-                except:
-                    pass
-            
-            # If user cannot be resolved, skip user (do not attempt invalid access_hash=0)
-            if user_peer is None:
-                skipped += 1
-                errors_detail["peer"] += 1
-                if not first_error: first_error = f"Can't resolve {uid} (no username)"
-                await asyncio.sleep(1.5)
-                continue
-            
-            # 🌐 Global throttle — مثل موازی
-            try:
-                from add_engine import global_throttle as _gt_single
-                await _gt_single(add_mode)
-                if atk_state.get("_stop_requested"):
-                    break
-            except Exception:
-                pass
-            
-            # InviteToChannel (بدون AddContact — مثل موازی، ۱ درخواست)
-            try:
-                invite_res = await client.invoke(
-                    InviteToChannel(channel=target_peer, users=[user_peer])
-                )
-            except AttributeError:
-                invite_res = await client.app.invoke(
-                    InviteToChannel(channel=target_peer, users=[user_peer])
-                )
-
-            if invite_did_not_join(invite_res, uid):
-                skipped += 1
-                errors_detail["not_joined"] += 1
-                print(f"⚠️ Invite missing_invitees: {uid} — counted as skipped", flush=True)
-                # مثل موازی: این هم یک درخواست کامل است → تأخیر لازم
-                try:
-                    from add_engine import global_throttle as _gt2
-                    await _gt2(add_mode)
-                except: pass
-                await asyncio.sleep(0.5)
-                continue
-            
-            added += 1
-            mark_user_as_added(target_gid, target_name, uid, phone)
-            limits = load_adder_limits()
-            limits[phone] = {"added": already_added + added, "last_used": int(time.time())}
-            save_adder_limits(limits)
-
-            first_n = member.get("first_name", "") or ""
-            last_n = member.get("last_name", "") or ""
-            full_n = (first_n + " " + last_n).strip() or f"کاربر {uid}"
-            un = member.get("username", "").strip()
-            display_user = f"{full_n} (@{un.lstrip('@')})" if un else full_n
-
-            if atk_state_ref is not None:
-                atk_state_ref["live_last_user"] = display_user
-                atk_state_ref["live_added"] = added
-                atk_state_ref["live_failed"] = failed
-                atk_state_ref["live_skipped"] = skipped
-                atk_state_ref["live_remaining"] = max(0, total - added - failed - skipped)
-                atk_state_ref["live_current_account"] = phone
-            
-            # 🧠 وقفه انسانی با نویز تصادفی (ضد بن شدن اکانت)
-            delay = human_delay(add_mode)
-            # هر چند اد یک استراحت انسانی کوتاه (شبیه رفتار کاربر واقعی)
-            if added > 0 and added % random.randint(8, 12) == 0:
-                brk = human_break_seconds(add_mode)
-                print(f"☕ استراحت انسانی {brk}s بعد از {added} اد...", flush=True)
-                try:
-                    await prog.edit_text(f"☕ استراحت انسانی کوتاه ({brk} ثانیه)...\n✅ {added} | ⏭ {skipped} | ❌ {failed}")
-                except Exception:
-                    pass
-                await asyncio.sleep(brk)
-            await asyncio.sleep(delay)
-            
-        except FloodWait as fw:
-            failed += 1
-            errors_detail["flood"] += 1
-            flood_wait_time = max(flood_wait_time, fw.value)
-            
-            # Mark account as limited if wait time is long
-            if fw.value > 3600:  # More than 1 hour
-                account_limited = True
-                print(f"🚫 Account limited for {fw.value // 3600} hours!", flush=True)
-                break  # Stop adding with this account
-            
-            wait = min(fw.value + 10, 300)  # Max 5 minutes
-            await prog.edit_text(f"⏱️ Flood Wait {fw.value}s — صبر...")
-            await asyncio.sleep(wait)
-        except UserAlreadyParticipant:
-            skipped += 1
-            errors_detail["already"] += 1
-            mark_user_as_added(target_gid, target_name, uid, phone)
-        except (UserPrivacyRestricted, UserNotMutualContact):
-            # 🔒 پروفایل قفل است — جزو آمار ادد حساب نمی‌شود
-            skipped += 1
-            errors_detail["privacy"] += 1
-            never_add_again(uid, "privacy")
-        except PeerIdInvalid:
-            # آیدی نامعتبر → اسکیپ + حذف از DB + بلاک‌لیست
-            skipped += 1
-            errors_detail["peer"] += 1
-            never_add_again(uid, "invalid")
-        except ChatAdminRequired:
-            failed += 1
-            errors_detail["other"] += 1
-            if not first_error: first_error = "اکانت ادمین نیست!"
-            break
-        except UsersTooMuch:
-            failed += 1
-            errors_detail["channels"] += 1
-            await asyncio.sleep(15)
-        except Exception as e:
-            failed += 1
-            error_msg = str(e)
-            es = error_msg.lower()
-            
-            # Check if account is banned
-            if "AUTH_KEY_UNREGISTERED" in error_msg or "SESSION_EXPIRED" in error_msg:
-                account_banned = True
-                print(f"🚫 Account BANNED or session expired!", flush=True)
-                break
-            
-            if "channels_too_much" in es:
-                errors_detail["channels"] += 1
-            elif "peer_flood" in es:
-                errors_detail["flood"] += 1
-                account_limited = True
-                print(f"🚫 Account limited (PEER_FLOOD)!", flush=True)
-                break
-            else:
-                errors_detail["other"] += 1
-            if not first_error: first_error = error_msg[:200]
-        
-        if (added + failed + skipped) % 3 == 0:
-            await upd()
-    
-    # 📡 پایان عملیات در مینی‌اپ
-    if atk_state_ref is not None:
-        atk_state_ref["add_in_progress"] = False
-        atk_state_ref["live_remaining"] = max(0, total - added - failed - skipped)
-        atk_state_ref["live_current_account"] = ""
-    
-    # Final report
-    elapsed = int(time.time() - start_t)
-    m, s = elapsed // 60, elapsed % 60
-    
-    # Build account status
-    account_status = ""
-    if account_banned:
-        account_status = "\n━━━━━━━━━━━━━━━\n🚫 <b>وضعیت اکانت:</b> بن شده/منقضی"
-    elif account_limited:
-        hours = flood_wait_time // 3600
-        account_status = f"\n━━━━━━━━━━━━━━━\n⏱️ <b>وضعیت اکانت:</b> محدود ({hours} ساعت)"
-    else:
-        account_status = "\n━━━━━━━━━━━━━━━\n✅ <b>وضعیت اکانت:</b> سالم"
-    
-    text = f"✅ <b>تمام شد!</b>\n"
-    text += f"━━━━━━━━━━━━━━━\n"
-    text += f"📂 منبع: {source_name}\n"
-    text += f"📡 مقصد: {target_name}\n"
-    text += f"✅ اضافه شده: {added}\n"
-    text += f"❌ ناموفق: {failed}\n"
-    text += f"⏭ رد شده: {skipped}\n"
-    text += f"⏱ زمان: {m:02d}:{s:02d}\n"
-    text += f"📊 ظرفیت: {already_added + added}/{MAX_ADD_PER_ACCOUNT}"
-    text += account_status
-    
-    if failed > 0 or errors_detail.get("peer", 0) > 0:
-        text += f"\n\n<b>جزئیات خطا:</b>\n"
-        if errors_detail["peer"]: text += f"🔍 Peer Invalid: {errors_detail['peer']}\n"
-        if errors_detail["privacy"]: text += f"🔒 Privacy: {errors_detail['privacy']}\n"
-        if errors_detail.get("not_joined"): text += f"👻 دعوت شد ولی عضو نشد: {errors_detail['not_joined']}\n"
-        if errors_detail["already"]: text += f"👥 قبلاً عضو: {errors_detail['already']}\n"
-        if errors_detail["flood"]: text += f"⏱ Flood: {errors_detail['flood']}\n"
-        if errors_detail["other"]: text += f"❓ سایر: {errors_detail['other']}\n"
-        if first_error: text += f"\n💬 اولین خطا: {first_error[:200]}"
-    
-    # Cleanup
-    atk_state.pop("_simp_client", None)
-    atk_state.pop("_simp_members", None)
-    
-    buttons = [
-        [InlineKeyboardButton("🔄 ادد از گروه دیگه", callback_data="pick_account_add")],
-        [InlineKeyboardButton(" خانه", callback_data="home")],
-    ]
-    
-    try:
-        await prog.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-    except: pass
 
 
 async def _do_quick_add(q, gid, gname, uid_list, client, phone):
