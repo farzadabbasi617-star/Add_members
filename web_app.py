@@ -671,8 +671,13 @@ def normalize_group_ref(raw):
     return None
 
 
-def trigger_scrape_group(chat_target):
-    """Trigger live member scraping from discovered Telegram group into DB"""
+def trigger_scrape_group(chat_target, deep=False):
+    """استخراج زنده‌ی اعضا از گروه تلگرام به دیتابیس.
+
+    deep=True لایه‌ی سوم (کشف اعضای مخفی) را هم اجرا می‌کند: اشتراک
+    گروهی، مخاطبین، جستجوی سراسری و تأیید دسته‌ای. بسیار کندتر و
+    پرریسک‌تر از نظر فلود است، پس پیش‌فرض خاموش است.
+    """
     try:
         ref = normalize_group_ref(chat_target)
         if ref is None:
@@ -702,7 +707,7 @@ def trigger_scrape_group(chat_target):
             atk_state_ref["live_added"] = 0
             atk_state_ref["live_failed"] = 0
             atk_state_ref["live_skipped"] = 0
-            atk_state_ref["live_mode"] = "اسکرپ گروه"
+            atk_state_ref["live_mode"] = "اسکرپ عمیق گروه" if deep else "اسکرپ گروه"
             # بدون live_total، پرچم finished در داشبورد هرگز True نمی‌شود
             # و خلاصه‌ی پایان اسکرپ نمایش داده نمی‌ماند.
             atk_state_ref["live_total"] = 1
@@ -756,6 +761,7 @@ def trigger_scrape_group(chat_target):
                     chat_target,
                     progress_cb=_on_progress,
                     incremental_save_cb=_on_save,
+                    deep=deep,
                 )
                 if atk_state_ref is not None:
                     count_got = len(scraped.get("found_users", {})) if isinstance(scraped, dict) else len(scraped or [])
@@ -1490,6 +1496,15 @@ MINI_APP_HTML = """<!DOCTYPE html>
                     <span dir="ltr">-1001234567890</span> · لینک دعوت خصوصی
                 </div>
 
+                <label class="flex items-start gap-2 bg-slate-900/60 border border-slate-700 rounded-xl px-3 py-2.5 cursor-pointer">
+                    <input type="checkbox" id="scrape-deep" class="mt-0.5 accent-emerald-500">
+                    <span class="text-[11px] leading-5">
+                        <span class="text-white font-bold">حالت عمیق (کشف اعضای مخفی)</span><br>
+                        <span class="text-slate-400">اشتراک گروهی، مخاطبین و جستجوی سراسری را هم اجرا می‌کند.
+                        اعضای بیشتری پیدا می‌شود ولی خیلی کندتر است و ریسک محدودیت تلگرام دارد.</span>
+                    </span>
+                </label>
+
                 <button onclick="startGroupScrape()" id="btn-scrape"
                         class="w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-xs font-black rounded-xl shadow-lg active:scale-95 transition">
                     📥 شروع استخراج ممبر
@@ -1697,7 +1712,10 @@ MINI_APP_HTML = """<!DOCTYPE html>
                 const res = await fetch('/api/scrape/group', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ target: raw })
+                    body: JSON.stringify({
+                        target: raw,
+                        deep: !!document.getElementById('scrape-deep')?.checked
+                    })
                 });
                 const d = await res.json();
                 scrapeMsg(d.message || d.error || '', d.ok ? 'ok' : 'err');
@@ -2523,7 +2541,7 @@ class StandardWebAppHandler(BaseHTTPRequestHandler):
                 body = json.dumps({"ok": ok, "message": msg}).encode('utf-8')
             elif path == '/api/scrape/group':
                 target = post_data.get("target", "")
-                ok, msg = trigger_scrape_group(target)
+                ok, msg = trigger_scrape_group(target, deep=bool(post_data.get("deep")))
                 body = json.dumps({"ok": ok, "message": msg}).encode('utf-8')
             elif path == '/api/accounts/probe':
                 async def _run_probe():
@@ -2644,7 +2662,7 @@ def create_web_app(app_bot=None, atk_state=None):
             try:
                 data = await request.json()
                 target = data.get("target", "")
-                ok, msg = trigger_scrape_group(target)
+                ok, msg = trigger_scrape_group(target, deep=bool(data.get("deep")))
                 return web.json_response({"ok": ok, "message": msg}, headers=NO_CACHE)
             except Exception as e:
                 return web.json_response({"ok": False, "error": str(e)}, status=400, headers=NO_CACHE)

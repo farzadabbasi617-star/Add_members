@@ -12,6 +12,15 @@ import sqlite3
 from pyrogram import Client
 from pyrogram.errors import FloodWait, ChatAdminRequired, SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, AuthKeyDuplicated, AuthKeyUnregistered
 from pyrogram.raw import functions, types
+from pyrogram.enums import MessageEntityType
+
+import scrape_api
+
+# انواع انتیتی که کاربر واقعی به آن‌ها چسبیده است.
+# ⚠️ مقایسه‌ی رشته‌ای (`ent.type in ("mention","text_mention")`) همیشه
+# False بود چون ent.type یک enum است نه رشته — منشن‌ها بی‌صدا از دست
+# می‌رفتند.
+_USER_ENTITY_TYPES = (MessageEntityType.MENTION, MessageEntityType.TEXT_MENTION)
 
 # ===== قفل سراسری برای جلوگیری از database is locked =====
 # یک قفل کلی برای اینکه دو Client همزمان connect/disconnect نکنن
@@ -133,6 +142,7 @@ class AdvancedScraper:
         self._incremental_save_cb = None  # ذخیره تدریجی
         self._stop_requested = False  # درخواست توقف از کاربر
         self._existing_user_ids = set()  # کاربرایی که قبلاً استخراج شدن
+        self._checked_members = set()  # نامزدهایی که عضویتشان بررسی شده
 
     def request_stop(self):
         self._stop_requested = True
@@ -484,77 +494,117 @@ class AdvancedScraper:
 
     # ═══════════════ 🔥 ULTIMATE SCRAPING METHODS ═══════════════
 
-    async def scrape_aggressive_pagination(self, chat_id, max_prefixes=500):
-        """🔥 روش ۹: صفحه‌بندی تهاجمی با تمام Unicode blocks
-        این متد معروف‌ترین تکنیک اسکرپرهای حرفه‌ایه. به جای محدود شدن
-        به الفبای فارسی و انگلیسی، تمام Unicode blocks شامل عربی،
-        سیریلیک، چینی، ایموجی و کاراکترهای خاص رو جستجو میکنه.
-        هر نتیجه جدید cross-check میشه با group membership."""
-        print(f"\n🔥 روش ۹: صفحه‌بندی تهاجمی با یونیکد کامل...", flush=True)
-        self._stage = "صفحه‌بندی تهاجمی (Unicode کامل)"
+    async def scrape_aggressive_pagination(self, chat_id, max_prefixes=400):
+        """🔥 روش ۹: صفحه‌بندی تهاجمی روی لیست اعضا (بازنویسی‌شده)
+
+        ⚡ چرا این بازنویسی مهم‌ترین بهبود است:
+
+        نسخه‌ی قبلی برای هر پیشوند یک `contacts.Search` **سراسری** می‌زد
+        — یعنی در کل تلگرام دنبال آن حرف می‌گشت، نه در گروه هدف. بعد
+        برای تک‌تک نتایج یک `get_chat_member` می‌فرستاد تا ببیند اصلاً
+        عضو هست یا نه. با ۵۰۰ پیشوند × ۱۰۰ نتیجه یعنی تا ۵۰٬۰۰۰ درخواست
+        تأیید، برای کاربرانی که تقریباً هیچ‌کدام عضو گروه نبودند. نتیجه:
+        فلود قطعی و نرخ اصابت نزدیک صفر.
+
+        نسخه‌ی جدید از `channels.GetParticipants` با فیلتر
+        `ChannelParticipantsSearch` استفاده می‌کند: جستجو را **سرور
+        تلگرام روی لیست اعضای همان کانال** انجام می‌دهد. پس
+
+          • هر نتیجه قطعاً عضو است ⇒ صفر درخواست تأیید
+          • آبجکت کامل کاربر در همان پاسخ می‌آید ⇒ صفر get_users
+          • سقف ۱۰٬۰۰۰ نفریِ لیست معمولی دور زده می‌شود، چون هر پیشوند
+            سهمیه‌ی مستقل دارد — این تنها راه شناخته‌شده برای بیرون
+            کشیدن اعضای گروه‌های خیلی بزرگ است.
+
+        از ~۵۰٬۰۰۰ درخواست به ~۴۰۰ درخواست، با نرخ اصابت بسیار بالاتر.
+        """
+        print("\n🔥 روش ۹: صفحه‌بندی تهاجمی روی لیست اعضا...", flush=True)
+        self._stage = "صفحه‌بندی تهاجمی (جستجوی سمت سرور)"
         await self._progress(force=True)
-        
-        # Build comprehensive prefix list
-        prefixes = []
-        # Latin + Extended
-        prefixes.extend(chr(c) for c in range(0x41, 0x5B))  # A-Z
-        prefixes.extend(chr(c) for c in range(0x61, 0x7B))  # a-z
-        prefixes.extend(chr(c) for c in range(0x30, 0x3A))  # 0-9
-        
-        # Arabic block (includes Persian)
-        prefixes.extend(chr(c) for c in range(0x0600, 0x0700) if chr(c).isalpha())
-        
-        # Cyrillic (Russian, Ukrainian, etc.)
-        prefixes.extend(chr(c) for c in range(0x0400, 0x0500) if chr(c).isalpha())
-        
-        # CJK (Chinese, Japanese, Korean) - sample key characters
-        cjk_samples = [chr(0x4E00), chr(0x4E2D), chr(0x56FD), chr(0x6587), chr(0x5927),
-                       chr(0x4EBA), chr(0x65E5), chr(0x672C), chr(0x8A00), chr(0x8A9E)]
-        prefixes.extend(cjk_samples)
-        
-        # Common emoji prefixes (first char of common emoji sequences)
-        emoji_chars = ["😂", "❤", "🔥", "👍", "😍", "🙏", "💯", "🎉", "✨", "😊",
-                       "💪", "🥰", "🫶", "😎", "👀", "🤔", "💀", "🎮", "💻", "📱"]
-        prefixes.extend(emoji_chars)
-        
-        # Turkish/Latin extended
-        prefixes.extend(["ş", "ğ", "ç", "ö", "ü", "ı", "Ş", "Ğ", "Ç", "Ö", "Ü", "İ"])
-        
-        # Devanagari (Hindi, Marathi, etc.)
-        prefixes.extend([chr(0x0915), chr(0x092E), chr(0x0938), chr(0x092A), chr(0x0930)])
-        
+
+        input_channel = await scrape_api.as_input_channel(self.app, chat_id)
+        if input_channel is None:
+            print("⚠️ گروه ساده است (کانال نیست) — این روش کاربرد ندارد", flush=True)
+            return
+
+        prefixes = self._build_search_prefixes()
         discovered = 0
-        prefixes = list(dict.fromkeys(prefixes))  # Remove duplicates, preserve order
-        random.shuffle(prefixes[50:])  # Shuffle non-Latin for variety
-        
+        exhausted = 0
+
         for pi, prefix in enumerate(prefixes[:max_prefixes]):
             if self._stop_requested:
                 return
-            try:
-                self.total_api_calls += 1
-                res = await self.app.invoke(functions.contacts.Search(q=prefix, limit=100))
-                for u in res.users:
-                    if self._stop_requested: return
-                    if u.id in self.found_users:
-                        continue
-                    try:
-                        mem = await self.app.get_chat_member(chat_id, u.id)
-                        if mem:
-                            await self.add_user(u, f"agg_page_{prefix}")
-                            discovered += 1
-                    except: pass
-                
-                if pi % 20 == 0:
-                    self._stage = f"صفحه‌بندی یونیکد: '{prefix}' | {discovered} جدید"
-                    await self._progress()
-                await self.human_sleep(0.3, 0.7)
-            except FloodWait as e:
-                await self.handle_flood(e)
-            except Exception:
-                continue
-        
+            before = len(self.found_users)
+            self.total_api_calls += 1
+            async for u in scrape_api.iter_participants_search(
+                    self.app, chat_id, query=prefix, limit=200,
+                    max_total=10000, on_flood=self.handle_flood):
+                if self._stop_requested:
+                    return
+                if u.id in self.found_users or u.id in self._existing_user_ids:
+                    continue
+                if getattr(u, "bot", False) or getattr(u, "deleted", False):
+                    continue
+                self.found_users[u.id] = {
+                    "user_id": u.id,
+                    "first_name": getattr(u, "first_name", "") or "",
+                    "last_name": getattr(u, "last_name", "") or "",
+                    "username": getattr(u, "username", "") or "",
+                    "phone": getattr(u, "phone", "") or "",
+                    "is_premium": "بله" if getattr(u, "premium", False) else "خیر",
+                    "source": f"search_{prefix}",
+                }
+                discovered += 1
+
+            gained = len(self.found_users) - before
+            # پیشوندهایی که چیزی نمی‌دهند نشانه‌ی پوشش کامل‌اند؛ اگر
+            # پشت‌سرهم ۴۰ تا خالی بود ادامه دادن اتلاف درخواست است.
+            exhausted = exhausted + 1 if gained == 0 else 0
+            if exhausted >= 40 and discovered > 0:
+                print(f"⏹️ پوشش کامل شد بعد از {pi + 1} پیشوند", flush=True)
+                break
+
+            if pi % 10 == 0:
+                self._stage = f"جستجوی اعضا: '{prefix}' | {discovered} پیدا شده"
+                await self._progress()
+            await self.human_sleep(0.15, 0.35)
+
         print(f"✅ Aggressive Pagination: {discovered} کاربر جدید", flush=True)
 
+    @staticmethod
+    def _build_search_prefixes():
+        """ساخت فهرست پیشوندهای جستجو.
+
+        ⚠️ نسخه‌ی قبلی `random.shuffle(prefixes[50:])` می‌نوشت که یک
+        no-op کامل است: برش یک لیست جدید می‌سازد، شافل روی همان کپی
+        اعمال می‌شود و دور ریخته می‌شود. لیست اصلی دست‌نخورده می‌ماند.
+        """
+        prefixes = []
+        prefixes.extend(chr(c) for c in range(0x61, 0x7B))          # a-z
+        prefixes.extend(chr(c) for c in range(0x30, 0x3A))          # 0-9
+        # فارسی/عربی — پرکاربردترین‌ها اول
+        prefixes.extend(list("امحسنرتبدکیلپفگعشقزوهجخطصضثذغظژچ"))
+        prefixes.extend(chr(c) for c in range(0x0600, 0x0700) if chr(c).isalpha())
+        prefixes.extend(chr(c) for c in range(0x0400, 0x0450) if chr(c).isalpha())
+        prefixes.extend(["ş", "ğ", "ç", "ö", "ü", "ı"])
+        prefixes.extend([chr(0x4E00), chr(0x4E2D), chr(0x56FD),
+                         chr(0x6587), chr(0x5927), chr(0x4EBA)])
+        prefixes.extend([chr(0x0915), chr(0x092E), chr(0x0938)])
+
+        # دو-حرفی‌های پرتکرار: وقتی یک حرف به سقف نتایج می‌خورد،
+        # ترکیب‌ها لایه‌ی بعدی اعضا را بیرون می‌کشند.
+        for a in "abcdefghijklmnopqrstuvwxyz":
+            prefixes.append(a + "a")
+        for a in "امحسنرتبدکی":
+            prefixes.append(a + "ا")
+
+        seen = set()
+        out = []
+        for p in prefixes:
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
 
     async def scrape_group_intersection(self, chat_id, max_other_groups=30):
         """🔥 روش ۱۰: اسکن اشتراک گروهی (Group Intersection)
@@ -680,21 +730,23 @@ class AdvancedScraper:
                             fwd_found += 1
                     except: pass
             
-            # Poll voters
+            # Poll voters — رأی‌دهنده‌ها منبع عالی‌ای هستند چون
+            # اکثرشان هیچ‌وقت پیام نمی‌دهند.
+            # ⚠️ نسخه‌ی قبلی `get_poll_voters` را صدا می‌زد که در این
+            # نسخه‌ی Pyrogram وجود ندارد ⇒ AttributeError خاموش.
             if msg.poll:
-                try:
-                    poll_results = await self.app.get_poll_voters(chat_id, msg.id, limit=50)
-                    for voter in poll_results.voters:
-                        uid = voter.user.id
-                        if uid not in self.found_users:
-                            try:
-                                mem = await self.app.get_chat_member(chat_id, uid)
-                                if mem:
-                                    await self.add_user(voter.user, "poll_voter")
-                                    fwd_found += 1
-                            except: pass
-                except: pass
-            
+                self.total_api_calls += 1
+                async for uid, user in scrape_api.iter_poll_voters(
+                        self.app, chat_id, msg.id, limit=100,
+                        max_total=500, on_flood=self.handle_flood):
+                    if self._stop_requested:
+                        return
+                    if uid in self.found_users or uid in self._existing_user_ids:
+                        continue
+                    if user is not None:
+                        await self.add_user(user, "poll_voter")
+                        fwd_found += 1
+
             if msg_count % 200 == 0:
                 self._stage = f"اسکن فروارد: {msg_count} پیام | {fwd_found} جدید"
                 await self._progress()
@@ -723,100 +775,133 @@ class AdvancedScraper:
         else:
             ids_to_check = list(self.found_users.keys())
         
-        # Find new users not yet checked
-        unchecked = [uid for uid in ids_to_check if uid not in self._checked_members]
+        # ⚠️ نسخه‌ی قبلی self._checked_members را *قبل از* ساختنش
+        # می‌خواند ⇒ AttributeError در همان خط اول. حالا در __init__
+        # ساخته می‌شود و اینجا فقط محض احتیاط تضمین می‌گردد.
         if not hasattr(self, '_checked_members'):
             self._checked_members = set()
-        
+        unchecked = [uid for uid in ids_to_check
+                     if uid not in self._checked_members]
+
         import random as _rnd
         _rnd.shuffle(unchecked)
         
+        # ⚠️ نسخه‌ی قبلی `users.GetFullUser(InputUser(user_id=uid,
+        # access_hash=0))` می‌زد. access_hash صفر تقریباً همیشه نامعتبر
+        # است، پس آن فراخوانی همیشه شکست می‌خورد — و حتی اگر موفق
+        # می‌شد نتیجه‌اش دور ریخته می‌شد و بلافاصله get_chat_member
+        # صدا زده می‌شد. یعنی یک درخواست کاملاً هدررفته به ازای هر
+        # کاربر. حالا حذف شده و مستقیم تأیید انجام می‌شود.
         for i in range(0, min(5000, len(unchecked)), batch_size):
-            if self._stop_requested: return
-            batch = unchecked[i:i+batch_size]
-            
+            if self._stop_requested:
+                return
+            batch = unchecked[i:i + batch_size]
             for uid in batch:
-                if self._stop_requested: return
+                if self._stop_requested:
+                    return
                 self._checked_members.add(uid)
-                
+                self.total_api_calls += 1
                 try:
-                    # Use GetFullUser for faster resolution
-                    full_user = await self.app.invoke(
-                        functions.users.GetFullUser(
-                            id=types.InputUser(user_id=uid, access_hash=0)
-                        )
-                    )
-                    if full_user:
-                        # Try direct chat member check
-                        try:
-                            mem = await self.app.get_chat_member(chat_id, uid)
-                            if mem:
-                                # Get the actual user object
-                                u = await self.app.get_users(uid)
-                                await self.add_user(u, "mtproto_resolve")
-                                discovered += 1
-                        except: pass
+                    mem = await self.app.get_chat_member(chat_id, uid)
                 except FloodWait as e:
                     await self.handle_flood(e)
-                except: pass
-            
-            if discovered % 20 == 0 and discovered > 0:
+                    continue
+                except Exception:
+                    continue
+                if not mem:
+                    continue
+                user = getattr(mem, "user", None)
+                if user is None or user.id in self.found_users:
+                    continue
+                await self.add_user(user, "mtproto_resolve")
+                discovered += 1
+
+            if discovered and discovered % 20 == 0:
                 self._stage = f"MTProto resolve: {discovered} تایید شده"
                 await self._progress()
-            await self.human_sleep(0.5, 1.5)
-        
+            await self.human_sleep(0.2, 0.5)
+
         print(f"✅ MTProto Resolve: {discovered} کاربر جدید تایید شد", flush=True)
 
 
     async def scrape_global_search(self, chat_id, search_terms=None):
         """🆕 روش ۷: جستجوی سراسری و cross-reference با گروه هدف
-        با جستجوی کلمات کلیدی در messages.searchGlobal، کاربرانی که
-        در گروه هدف هم عضو هستن رو پیدا میکنه."""
+
+        ⚠️ نسخه‌ی قبلی `raw_fns.types.InputMessagesFilterEmpty()` را صدا
+        می‌زد؛ تایپ‌ها زیر `raw.types` هستند نه زیر `raw.functions`، پس
+        همان اولین تکرار AttributeError می‌داد و `except Exception:
+        continue` آن را می‌بلعید. این متد هرگز حتی یک کاربر نداد.
+
+        ⚡ بهبود دوم: نسخه‌ی قبلی برای هر نتیجه یک `get_chat_member` و
+        سپس یک `get_users` می‌زد (۲ درخواست به ازای هر نفر) در حالی که
+        نتایج جستجوی سراسری اصلاً ربطی به گروه هدف نداشتند. حالا
+        فرستنده‌ها یکجا جمع می‌شوند و با یک عبورِ دسته‌ای تأیید می‌شوند.
+        """
         if not search_terms:
-            # Auto-generate search terms from group context
-            search_terms = ["سلام", "hello", "ok", "بله", "👍", "🙂", "مرسی", "@", "لینک", "https", "عکس", "فیلم"]
-        
+            search_terms = ["سلام", "hello", "ok", "بله", "👍", "🙂", "مرسی",
+                            "لینک", "https", "عکس", "فیلم", "ممنون"]
+
         print(f"\n🔍 روش ۷: Global Search با {len(search_terms)} عبارت...", flush=True)
-        self._stage = f"جستجوی سراسری برای کشف اعضا"
+        self._stage = "جستجوی سراسری برای کشف اعضا"
         await self._progress(force=True)
-        
-        from pyrogram.raw import functions as raw_fns
-        discovered = 0
-        
+
+        candidates = {}
         for term in search_terms[:15]:
-            if self._stop_requested: return
-            try:
-                result = await self.app.invoke(
-                    raw_fns.messages.SearchGlobal(
-                        q=term, filter=raw_fns.types.InputMessagesFilterEmpty(), 
-                        min_date=0, max_date=0, offset_rate=0,
-                        offset_peer=raw_fns.types.InputPeerEmpty(), 
-                        offset_id=0, limit=50
-                    )
-                )
-                for msg in getattr(result, 'messages', []):
-                    if self._stop_requested: return
-                    self.total_api_calls += 1
-                    uid = getattr(msg, 'from_id', None)
-                    if uid and hasattr(uid, 'user_id'):
-                        uid = uid.user_id
-                        if uid not in self.found_users:
-                            try:
-                                mem = await self.app.get_chat_member(chat_id, uid)
-                                if mem:
-                                    u = await self.app.get_users(uid)
-                                    await self.add_user(u, f"global_search_{term}")
-                                    discovered += 1
-                            except: pass
-                await self.human_sleep(0.5, 1.0)
-            except FloodWait as e:
-                await self.handle_flood(e)
-            except Exception as e:
-                print(f"⚠️ Global search err for '{term}': {e}", flush=True)
+            if self._stop_requested:
+                return
+            self.total_api_calls += 1
+            result = await scrape_api.search_global(
+                self.app, term, limit=50, on_flood=self.handle_flood)
+            if result is None:
                 continue
-        
+            users = {u.id: u for u in getattr(result, "users", []) or []}
+            for msg in getattr(result, "messages", []) or []:
+                uid = scrape_api.peer_user_id(getattr(msg, "from_id", None))
+                if not uid or uid in self.found_users or uid in self._existing_user_ids:
+                    continue
+                # کاربر از خود پاسخ می‌آید ⇒ get_users لازم نیست
+                candidates.setdefault(uid, (users.get(uid), term))
+            self._stage = f"جستجوی سراسری: {len(candidates)} نامزد"
+            await self._progress()
+            await self.human_sleep(0.5, 1.0)
+
+        discovered = await self._confirm_and_add(
+            chat_id, candidates, "global_search")
         print(f"✅ Global Search: {discovered} کاربر جدید", flush=True)
 
+    async def _confirm_and_add(self, chat_id, candidates, source):
+        """تأیید عضویت نامزدها در گروه هدف و افزودنشان.
+
+        هر نامزد دقیقاً **یک** درخواست `get_chat_member` مصرف می‌کند.
+        نسخه‌های قبلی دو تا می‌زدند (یکی هم `get_users`) چون آبجکت کاربر
+        را دور می‌ریختند.
+        """
+        discovered = 0
+        for uid, (user, tag) in list(candidates.items()):
+            if self._stop_requested:
+                return discovered
+            if uid in self.found_users or uid in self._existing_user_ids:
+                continue
+            self.total_api_calls += 1
+            try:
+                mem = await self.app.get_chat_member(chat_id, uid)
+            except FloodWait as e:
+                await self.handle_flood(e)
+                continue
+            except Exception:
+                continue
+            if not mem:
+                continue
+            if user is not None:
+                await self.add_user(user, f"{source}_{tag}")
+            else:
+                try:
+                    await self.add_user(await self.app.get_users(uid), f"{source}_{tag}")
+                except Exception:
+                    continue
+            discovered += 1
+            await self.human_sleep(0.05, 0.15)
+        return discovered
 
     async def scrape_deep_history(self, chat_id, limit=10000, batch_size=500):
         """🆕 روش ۸: اسکن عمیق تاریخچه با offset پویا
@@ -829,10 +914,14 @@ class AdvancedScraper:
         scanned = 0
         discovered = 0
         offsets = list(range(0, limit, batch_size))
-        
-        # Shuffle offsets for non-sequential access (catches different time periods)
+
+        # ⚠️ `_rnd.shuffle(offsets[:10])` یک no-op بود: برش، کپی می‌سازد
+        # و شافل روی کپیِ دورریختنی اعمال می‌شد. اینجا روی خودِ لیست
+        # اعمال می‌شود.
         import random as _rnd
-        _rnd.shuffle(offsets[:10])  # Shuffle first 10 batches for variety
+        head = offsets[:10]
+        _rnd.shuffle(head)
+        offsets[:10] = head
         
         for offset in offsets:
             if self._stop_requested: return
@@ -852,7 +941,7 @@ class AdvancedScraper:
                         await self.add_user(msg.reply_to_message.from_user, "deep_reply")
                     if msg.entities:
                         for ent in msg.entities:
-                            if ent.type in ("mention", "text_mention") and ent.user:
+                            if ent.type in _USER_ENTITY_TYPES and ent.user:
                                 await self.add_user(ent.user, "deep_mention")
                     
                     await self.human_sleep(0.02, 0.05)
@@ -869,6 +958,50 @@ class AdvancedScraper:
             except: pass
         
         print(f"✅ Deep History: {scanned} پیام | {discovered} کاربر جدید", flush=True)
+
+    async def _harvest_reactions(self, chat_id, msg, source_prefix):
+        """استخراج ری‌اکت‌دهنده‌های یک پیام — مسیر مشترک و درست.
+
+        ⚠️ نسخه‌ی قبلی `self.app.get_message_reactions(...)` را صدا می‌زد
+        که در Pyrogram 2.0.106 **وجود ندارد**. AttributeError بلافاصله
+        توسط `except: break` بلعیده می‌شد، پس این «روش» همیشه صفر کاربر
+        برمی‌گرداند بدون هیچ خطایی در لاگ.
+
+        ضمناً نسخه‌ی قبلی به ازای هر ری‌اکت‌دهنده یک `get_users` جداگانه
+        می‌زد؛ حالا آبجکت کاربر از خود payload می‌آید ⇒ حذف صدها
+        درخواست و ریسک فلود.
+        """
+        if not msg.reactions or not getattr(msg.reactions, "reactions", None):
+            return 0
+        found = 0
+        for react in msg.reactions.reactions:
+            if self._stop_requested:
+                return found
+            emoji = getattr(react, "emoji", None) or getattr(react, "emoticon", None)
+            count_hint = getattr(react, "count", 0) or 0
+            self.total_api_calls += 1
+            async for uid, user in scrape_api.iter_message_reactors(
+                self.app, chat_id, msg.id, reaction=emoji,
+                limit=100, max_total=max(100, min(5000, count_hint * 2)),
+                on_flood=self.handle_flood,
+            ):
+                if self._stop_requested:
+                    return found
+                if uid in self.found_users or uid in self._existing_user_ids:
+                    continue
+                label = f"{source_prefix}_{emoji}" if emoji else source_prefix
+                if user is not None:
+                    await self.add_user(user, label)
+                else:
+                    # کاربر در payload نبود — حداقل شناسه را نگه دار
+                    self.found_users[uid] = {
+                        "user_id": uid, "first_name": str(uid), "last_name": "",
+                        "username": "", "phone": "", "is_premium": "نامشخص",
+                        "source": label,
+                    }
+                found += 1
+            await self.human_sleep(0.05, 0.15)
+        return found
 
     async def scrape_reactions_dedicated(self, chat_id, limit=5000):
         """🆕 روش ۴: اسکن اختصاصی ری‌اکشن‌ها — مستقیم میره سراغ پیام‌هایی که ری‌اکشن دارن
@@ -898,52 +1031,8 @@ class AdvancedScraper:
                 await self.human_sleep(0.03, 0.08)
                 continue
 
-            for react in msg.reactions.reactions:
-                if self._stop_requested:
-                    return
-                emoji = getattr(react, 'emoji', '👍')
-                count_hint = getattr(react, 'count', 0) or 0
-                # اگه تعداد ری‌اکت‌ها خیلی زیاده، با offset صفحه‌بندی کن
-                offset = 0
-                batch_limit = min(200, max(50, count_hint))
-                while True:
-                    try:
-                        reactors = await self.app.get_message_reactions(
-                            chat_id, msg.id, emoji, limit=batch_limit, offset=offset
-                        )
-                        if not reactors:
-                            break
-                        for r in reactors:
-                            if r and getattr(r, 'peer', None) and getattr(r.peer, 'user_id', None):
-                                try:
-                                    u = await self.app.get_users(r.peer.user_id)
-                                    await self.add_user(u, f"ری‌اکشن_{emoji}")
-                                    reaction_count += 1
-                                except:
-                                    # Fallback: add minimal info without full get_users
-                                    uid = r.peer.user_id
-                                    if uid not in self.found_users:
-                                        self._last_added_name = str(uid)
-                                        self.found_users[uid] = {
-                                            "user_id": uid,
-                                            "first_name": str(uid),
-                                            "last_name": "",
-                                            "username": "",
-                                            "phone": "",
-                                            "is_premium": "نامشخص",
-                                            "source": f"ری‌اکشن_{emoji}"
-                                        }
-                                        reaction_count += 1
-                        if len(reactors) < batch_limit:
-                            break
-                        offset += batch_limit
-                        await self.human_sleep(0.3, 0.6)
-                    except FloodWait as e:
-                        await self.handle_flood(e)
-                    except:
-                        break
-
-                await self.human_sleep(0.08, 0.2)
+            reaction_count += await self._harvest_reactions(
+                chat_id, msg, "ری‌اکشن")
 
             if msg_count % 100 == 0:
                 self._stage = f"اسکن ری‌اکشن: {msg_count} پیام | {reaction_count} کاربر از ری‌اکشن"
@@ -996,54 +1085,14 @@ class AdvancedScraper:
                 pass
 
             # ری‌اکشن‌های پست‌های کانال — منبع عالی برای استخراج
-            if msg.reactions and msg.reactions.reactions:
-                for react in msg.reactions.reactions:
-                    if self._stop_requested:
-                        return
-                    emoji = getattr(react, 'emoji', '👍')
-                    count_hint = getattr(react, 'count', 0) or 0
-                    batch_limit = min(200, max(50, count_hint))
-                    offset = 0
-                    while True:
-                        try:
-                            reactors = await self.app.get_message_reactions(
-                                chat_id, msg.id, emoji, limit=batch_limit, offset=offset
-                            )
-                            if not reactors:
-                                break
-                            for r in reactors:
-                                if r and getattr(r, 'peer', None) and getattr(r.peer, 'user_id', None):
-                                    try:
-                                        u = await self.app.get_users(r.peer.user_id)
-                                        await self.add_user(u, f"ری‌اکشن_کانال_{emoji}")
-                                        reactors_found += 1
-                                    except:
-                                        uid = r.peer.user_id
-                                        if uid not in self.found_users:
-                                            self.found_users[uid] = {
-                                                "user_id": uid,
-                                                "first_name": str(uid),
-                                                "last_name": "",
-                                                "username": "",
-                                                "phone": "",
-                                                "is_premium": "نامشخص",
-                                                "source": f"ری‌اکشن_کانال_{emoji}"
-                                            }
-                                            reactors_found += 1
-                            if len(reactors) < batch_limit:
-                                break
-                            offset += batch_limit
-                            await self.human_sleep(0.3, 0.6)
-                        except FloodWait as e:
-                            await self.handle_flood(e)
-                        except:
-                            break
-                    await self.human_sleep(0.08, 0.2)
+            if msg.reactions and getattr(msg.reactions, 'reactions', None):
+                reactors_found += await self._harvest_reactions(
+                    chat_id, msg, "ری‌اکشن_کانال")
 
             # Entity mentions in post captions
             if msg.entities:
                 for ent in msg.entities:
-                    if ent.type in ("mention", "text_mention") and ent.user:
+                    if ent.type in _USER_ENTITY_TYPES and ent.user:
                         await self.add_user(ent.user, "منشن_کانال")
 
             if post_count % 100 == 0:
@@ -1093,7 +1142,78 @@ class AdvancedScraper:
         
         return self.found_users
 
-    async def run_full_scrape(self, chat_id, progress_cb=None, incremental_save_cb=None):
+    async def _run_strategy(self, chat_id, is_channel, deep=False):
+        """اجرای مرحله‌بندی‌شده‌ی روش‌های استخراج.
+
+        ⚠️ مشکلی که این متد حل می‌کند: از ۱۲ روش نوشته‌شده، فقط ۵ تا
+        اصلاً صدا زده می‌شدند. هفت روش دیگر — از جمله «اشتراک گروهی» که
+        در مستندات ۹۰٪ اعضای مخفی را وعده می‌داد — کد مرده بودند.
+
+        روش‌ها به سه لایه تقسیم شده‌اند و هر لایه فقط وقتی اجرا می‌شود
+        که لایه‌ی قبل کافی نبوده باشد. دلیلش این است که لایه‌های بعدی
+        بسیار پرهزینه‌ترند و بی‌دلیل اجرا کردنشان یعنی فلود.
+        """
+        # ── لایه ۱: ارزان و پربازده ───────────────────────────────
+        if is_channel:
+            print("📡 حالت کانال", flush=True)
+            await self._safe(self.scrape_channel_posts(chat_id, limit=10000), "پست کانال")
+            await self._safe(self.scrape_reactions_dedicated(chat_id, limit=5000), "ری‌اکشن")
+            await self._safe(self.scrape_direct_paginated(chat_id), "لیست مستقیم")
+        else:
+            print("⚡ لایه ۱: اسکن پایه", flush=True)
+            await self._safe(self.scrape_direct_paginated(chat_id), "لیست مستقیم")
+            await self._safe(self.scrape_full_history(chat_id, limit=5000), "تاریخچه")
+            await self._safe(self.scrape_join_events(chat_id), "ورود اعضا")
+
+        base = len(self.found_users)
+        expected = getattr(self, "_target_members_count", 0) or 0
+        # اگر بیش از ۸۵٪ اعضا را داریم، ادامه دادن فقط ریسک فلود است.
+        covered = expected and base >= expected * 0.85
+        if covered and not deep:
+            print(f"✅ پوشش کافی ({base}/{expected}) — لایه‌های بعدی لازم نیست", flush=True)
+            return
+
+        # ── لایه ۲: جستجوی سمت سرور، همچنان ارزان ────────────────
+        print("🔥 لایه ۲: جستجوی عمیق اعضا", flush=True)
+        await self._safe(self.scrape_aggressive_pagination(chat_id), "صفحه‌بندی")
+        if not is_channel:
+            await self._safe(self.scrape_deep_history(chat_id, limit=10000), "تاریخچه عمیق")
+        await self._safe(self.scrape_forwarded_messages(chat_id, limit=5000), "فروارد")
+
+        after2 = len(self.found_users)
+        if not deep:
+            print(f"📊 لایه ۲ تمام شد: {after2} کاربر", flush=True)
+            return
+
+        # ── لایه ۳: گران، فقط در حالت عمیق ───────────────────────
+        print("🕳️ لایه ۳: کشف اعضای مخفی (حالت عمیق)", flush=True)
+        await self._safe(self.scrape_group_intersection(chat_id), "اشتراک گروهی")
+        await self._safe(self.scrape_imported_contacts(chat_id), "مخاطبین")
+        await self._safe(self.scrape_global_search(chat_id), "جستجوی سراسری")
+        await self._safe(self.scrape_mtproto_super_resolve(chat_id), "تأیید دسته‌ای")
+
+    async def _safe(self, coro, label):
+        """اجرای یک روش با گزارش خطا.
+
+        ⚠️ سراسر این فایل پر از `except: pass` بود؛ به همین دلیل چهار
+        روشِ کاملاً شکسته ماه‌ها بی‌سروصدا صفر برمی‌گرداندند. اینجا خطا
+        بلعیده می‌شود (یک روش نباید کل عملیات را بخواباند) ولی
+        **حتماً چاپ می‌شود**.
+        """
+        before = len(self.found_users)
+        try:
+            await coro
+        except FloodWait as e:
+            await self.handle_flood(e)
+        except Exception as e:
+            print(f"⚠️ روش «{label}» شکست خورد: {type(e).__name__}: {e}", flush=True)
+            return 0
+        gained = len(self.found_users) - before
+        print(f"   ↳ «{label}»: +{gained} کاربر (مجموع {len(self.found_users)})", flush=True)
+        return gained
+
+    async def run_full_scrape(self, chat_id, progress_cb=None,
+                              incremental_save_cb=None, deep=False):
         self._progress_cb = progress_cb
         self._incremental_save_cb = incremental_save_cb
         self._last_progress = 0
@@ -1173,6 +1293,7 @@ class AdvancedScraper:
             chat_type_str = "کانال" if is_channel else "گروه"
             total_members = getattr(target_found, 'members_count', 0) or 0
             chat_type_db = "channel" if is_channel else "group"
+            self._target_members_count = total_members
             print(f"✅ هدف: {target_found.title} | نوع: {chat_type_str} | اعضا: {total_members or '?'}", flush=True)
 
             # 🆕 ذخیره در تاریخچه چت‌های اسکن شده (بدون AI - سرعت)
@@ -1199,18 +1320,7 @@ class AdvancedScraper:
             self._stage = f"🚀 شروع استخراج از {target_found.title}"
             await self._progress(force=True)
 
-            if is_channel:
-                print("📡 حالت کانال فعال شد", flush=True)
-                await self.scrape_channel_posts(chat_id, limit=10000)
-                await self.scrape_reactions_dedicated(chat_id, limit=5000)
-                try: await self.scrape_direct_paginated(chat_id)
-                except Exception as e: print(f"⚠️ get_chat_members کانال: {e}", flush=True)
-            else:
-                print("⚡ حالت سریع", flush=True)
-                # اسکن اصلی: paginated + history + join  
-                await self.scrape_direct_paginated(chat_id)
-                await self.scrape_full_history(chat_id, limit=5000)
-                await self.scrape_join_events(chat_id)
+            await self._run_strategy(chat_id, is_channel, deep=deep)
 
             # محاسبه درصد پیشرفت و آپدیت تاریخچه
             extracted = len(self.found_users)
