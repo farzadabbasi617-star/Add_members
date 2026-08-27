@@ -15,6 +15,7 @@ from pyrogram.raw import functions, types
 from pyrogram.enums import MessageEntityType
 
 import scrape_api
+from scrape_optimize import MessageHarvester, MembershipOracle, AdaptiveThrottle
 
 # انواع انتیتی که کاربر واقعی به آن‌ها چسبیده است.
 # ⚠️ مقایسه‌ی رشته‌ای (`ent.type in ("mention","text_mention")`) همیشه
@@ -143,6 +144,9 @@ class AdvancedScraper:
         self._stop_requested = False  # درخواست توقف از کاربر
         self._existing_user_ids = set()  # کاربرایی که قبلاً استخراج شدن
         self._checked_members = set()  # نامزدهایی که عضویتشان بررسی شده
+        self._oracle = None    # کش تأیید عضویت (در run_full_scrape ساخته می‌شود)
+        self._throttle = AdaptiveThrottle()  # تأخیر تطبیقی بر پایه‌ی فلود واقعی
+        self._harvester = None
 
     def request_stop(self):
         self._stop_requested = True
@@ -282,6 +286,11 @@ class AdvancedScraper:
             await self._progress()
 
     async def handle_flood(self, e):
+        # به تنظیم‌کننده‌ی تطبیقی خبر بده تا تأخیر پایه را بالا ببرد
+        try:
+            self._throttle.on_flood(e.value)
+        except Exception:
+            pass
         wait = e.value + random.randint(1,4)
         print(f"⏱️ فلود {wait}s", flush=True)
         self._stage = f"محدودیت سرعت تلگرام، {wait} ثانیه صبر..."
@@ -339,6 +348,9 @@ class AdvancedScraper:
                 self.found_users[uid] = {"user_id": uid, "first_name": u.first_name or "",
                     "last_name": u.last_name or "", "username": u.username or "",
                     "phone": getattr(u, 'phone_number', '') or '', "source": "direct"}
+                # عضو قطعی — کش را پر کن تا لایه‌های بعد نپرسند
+                if self._oracle is not None:
+                    self._oracle.mark_member(uid)
                 count += 1
                 # Progress every 2s
                 now = time.time()
@@ -359,75 +371,25 @@ class AdvancedScraper:
         
         return len(self.found_users) > 0  # True if we got members
     async def scrape_full_history(self, chat_id, limit=10000):
-        """اسکن فوق‌سریع تاریخچه — بدون sleep، بدون add_user overhead"""
-        print(f"\n🔍 اسکن {limit} پیام...", flush=True)
-        self._stage = f"اسکن تاریخچه ({limit} پیام)"
-        msg_count = 0; found = 0; last_prog = 0; t0 = time.time()
-        existing = self._existing_user_ids
-        
-        async for msg in self.app.get_chat_history(chat_id, limit=limit):
-            if self._stop_requested: return
-            msg_count += 1
-            
-            # Inline add — no add_user() overhead
-            users_to_add = []
-            if msg.from_user and msg.from_user.id not in self.found_users and msg.from_user.id not in existing:
-                users_to_add.append((msg.from_user, "msg"))
-            if msg.forward_from and msg.forward_from.id not in self.found_users and msg.forward_from.id not in existing:
-                users_to_add.append((msg.forward_from, "fwd"))
-            if msg.reply_to_message and msg.reply_to_message.from_user:
-                u = msg.reply_to_message.from_user
-                if u.id not in self.found_users and u.id not in existing:
-                    users_to_add.append((u, "reply"))
-            if msg.entities:
-                for ent in msg.entities:
-                    if ent.user and ent.user.id not in self.found_users and ent.user.id not in existing:
-                        users_to_add.append((ent.user, "mention"))
-            
-            for u, src in users_to_add:
-                uid = u.id
-                if uid in self.found_users or uid in existing: continue
-                if getattr(u, 'is_bot', False) or getattr(u, 'is_deleted', False): continue
-                self.found_users[uid] = {"user_id": uid, "first_name": u.first_name or "",
-                    "last_name": u.last_name or "", "username": u.username or "",
-                    "phone": getattr(u, 'phone_number', '') or '', "source": src}
-                found += 1
-            
-            # Progress every 2s
-            now = time.time()
-            if now - last_prog > 2:
-                last_prog = now; self.total_api_calls += 1
-                speed = int(found / max(1, now - t0) * 60)
-                self._stage = f"📜 {msg_count} پیام | {found} جدید | ⚡{speed}/min"
-                await self._progress()
-            if msg_count % 50 == 0:
-                await asyncio.sleep(0.02)
-        
-        elapsed = int(time.time() - t0)
-        print(f"✅ تاریخچه: {msg_count} پیام | {found} جدید در {elapsed}s", flush=True)
+        """🔍 روش ۲: فرستنده، فروارد، ریپلای و منشن از تاریخچه.
+
+        ⚡ حالا به عبور واحد واگذار می‌شود. این چهار منبع دقیقاً همان
+        چیزی هستند که `MessageHarvester` در یک عبور برمی‌دارد، پس
+        نگه‌داشتن یک پیاده‌سازی دوم فقط یعنی خواندن دوباره‌ی تاریخچه.
+
+        روش به‌عنوان نقطه‌ی ورود مستقل حفظ شده (اگر کسی فقط همین را
+        بخواهد) ولی در استراتژی از مسیر یکپارچه می‌آید.
+        """
+        return await self.scrape_unified_history(chat_id, limit=limit)
 
     async def scrape_join_events(self, chat_id):
-        """اسکن فوق‌سریع پیام‌های join"""
-        found = 0; last_prog = 0; t0 = time.time()
-        existing = self._existing_user_ids
-        async for msg in self.app.get_chat_history(chat_id, limit=100000):
-            if self._stop_requested: return
-            if not msg.new_chat_members: continue
-            for u in msg.new_chat_members:
-                uid = u.id
-                if uid in self.found_users or uid in existing: continue
-                if getattr(u, 'is_bot', False): continue
-                self.found_users[uid] = {"user_id": uid, "first_name": u.first_name or "",
-                    "last_name": u.last_name or "", "username": u.username or "",
-                    "phone": getattr(u, 'phone_number', '') or '', "source": "join"}
-                found += 1
-            now = time.time()
-            if now - last_prog > 2:
-                last_prog = now
-                self._stage = f"🚪 Join events: {found} جدید"
-                await self._progress()
-        self._stage = f"🚪 Join: {found} کاربر"
-        print(f"✅ Join events: {found} کاربر", flush=True)
+        """🚪 روش ۳: اعضای تازه‌وارد (پیام‌های join).
+
+        ⚡ به عبور واحد واگذار شد. نسخه‌ی قبلی یک عبور کامل جدا روی
+        ۱۰۰٬۰۰۰ پیام می‌زد و از هر پیام فقط `new_chat_members` را
+        نگاه می‌کرد — کل تاریخچه دانلود می‌شد تا یک فیلد خوانده شود.
+        """
+        return await self.scrape_unified_history(chat_id, limit=100000)
 
     async def scrape_imported_contacts(self, chat_id, max_import=500):
         """🆕 روش ۶: importContacts برای کشف اعضای مخفی
@@ -454,14 +416,16 @@ class AdvancedScraper:
             for uid in list(existing_contacts)[:200]:
                 if self._stop_requested: return
                 self.total_api_calls += 1
-                try:
-                    mem = await self.app.get_chat_member(chat_id, uid)
-                    if mem and uid not in self.found_users:
-                        u = await self.app.get_users(uid)
-                        await self.add_user(u, "imported_contact")
+                if uid in self.found_users:
+                    continue
+                if await self._oracle.is_member(uid):
+                    try:
+                        await self.add_user(await self.app.get_users(uid),
+                                            "imported_contact")
                         discovered += 1
-                except: pass
-                await self.human_sleep(0.1, 0.3)
+                    except Exception:
+                        pass
+                await self._throttle.wait()
         except Exception as e:
             print(f"⚠️ Import contacts err: {e}", flush=True)
         
@@ -478,12 +442,9 @@ class AdvancedScraper:
                             self.total_api_calls += 1
                             uid = member.user.id
                             if uid not in self.found_users:
-                                try:
-                                    mem = await self.app.get_chat_member(chat_id, uid)
-                                    if mem:
-                                        await self.add_user(member.user, "common_chat")
-                                        discovered += 1
-                                except: pass
+                                if await self._oracle.is_member(uid):
+                                    await self.add_user(member.user, "common_chat")
+                                    discovered += 1
                     except: pass
                 await self.human_sleep(0.2, 0.5)
         except Exception as e:
@@ -649,17 +610,15 @@ class AdvancedScraper:
                             skipped += 1
                             continue
                         
-                        try:
-                            mem = await self.app.get_chat_member(chat_id, uid)
-                            if mem:
-                                await self.add_user(member.user, f"intersection_{gname[:15]}")
-                                discovered += 1
-                        except: pass
-                        
+                        if await self._oracle.is_member(uid):
+                            await self.add_user(member.user,
+                                                f"intersection_{gname[:15]}")
+                            discovered += 1
+
                         if checked % 100 == 0:
                             self._stage = f"اشتراک: {discovered} جدید | {checked} بررسی"
                             await self._progress()
-                        await self.human_sleep(0.05, 0.12)
+                        await self._throttle.wait()
                         
                 except FloodWait as e:
                     await self.handle_flood(e)
@@ -679,81 +638,44 @@ class AdvancedScraper:
 
 
     async def scrape_forwarded_messages(self, chat_id, limit=5000):
-        """🔥 روش ۱۱: اسکن فرواردها و cross-postها
-        پیام‌های فروارد شده از کانال‌ها و گروه‌های دیگه رو بررسی میکنه.
-        هر فرستنده اصلی که عضو گروه هدف باشه رو استخراج میکنه.
-        خیلی از کاربرا هیچوقت پیام نمیدن ولی پیامشون توسط
-        دیگران فروارد میشه — این روش اونارو گیر میندازه."""
-        print(f"\n🔥 روش ۱۱: اسکن فرواردها...", flush=True)
-        self._stage = "اسکن فرواردهای پیام‌ها"
+        """🔥 روش ۱۱: فرواردها، ریپلای‌ها و رأی‌دهنده‌های نظرسنجی.
+
+        ⚡ این متد حالا **داده‌ی جمع‌آوری‌شده در عبور واحد** را پردازش
+        می‌کند و تاریخچه را دوباره نمی‌خواند.
+
+        نسخه‌ی قبلی یک عبور کامل جدا روی تاریخچه می‌زد و بدتر، برای
+        فرستنده‌ی *هر* فروارد و *هر* ریپلای یک `get_chat_member`
+        تأییدی می‌فرستاد — روی ۵٬۰۰۰ پیام یعنی هزاران درخواست اضافه.
+
+        حالا `MessageHarvester` فرواردها و ریپلای‌ها را در همان عبور
+        اول برداشته و شناسه‌ی نظرسنجی‌ها را نگه داشته است. تنها کار
+        باقی‌مانده تأیید نامزدهایی است که هنوز در کش قطعی نشده‌اند.
+        """
+        h = getattr(self, "_harvester", None)
+        if h is None:
+            # عبور واحد اجرا نشده — یعنی این روش مستقل صدا زده شده.
+            h = await self.scrape_unified_history(chat_id, limit=limit)
+            return
+
+        pending = [uid for uid in list(self.found_users.keys())
+                   if not self._oracle.is_settled(uid)]
+        if not pending:
+            print("✅ فروارد/ریپلای: همه در عبور واحد پوشش داده شدند", flush=True)
+            return
+
+        self._stage = f"تأیید {len(pending):,} نامزد فروارد/ریپلای"
         await self._progress(force=True)
-        
-        msg_count = 0
-        fwd_found = 0
-        
-        async for msg in self.app.get_chat_history(chat_id, limit=limit):
-            if self._stop_requested: return
-            self.total_api_calls += 1
-            msg_count += 1
-            
-            # Check forwarded messages
-            if msg.forward_from and msg.forward_from.id not in self.found_users:
-                try:
-                    mem = await self.app.get_chat_member(chat_id, msg.forward_from.id)
-                    if mem:
-                        await self.add_user(msg.forward_from, "fwd_author")
-                        fwd_found += 1
-                except: pass
-            
-            # Check forwarded from hidden users (forward_sender_name)
-            if msg.forward_from_chat:
-                # Cross-post from another channel - the original channel
-                # might tell us about overlapping audience
-                pass
-            
-            # Check reply-to-msg authors
-            if msg.reply_to_message:
-                if msg.reply_to_message.from_user and msg.reply_to_message.from_user.id not in self.found_users:
-                    try:
-                        mem = await self.app.get_chat_member(chat_id, msg.reply_to_message.from_user.id)
-                        if mem:
-                            await self.add_user(msg.reply_to_message.from_user, "reply_author")
-                            fwd_found += 1
-                    except: pass
-                
-                # Also check if the replied message was forwarded
-                if msg.reply_to_message.forward_from and msg.reply_to_message.forward_from.id not in self.found_users:
-                    try:
-                        mem = await self.app.get_chat_member(chat_id, msg.reply_to_message.forward_from.id)
-                        if mem:
-                            await self.add_user(msg.reply_to_message.forward_from, "reply_fwd")
-                            fwd_found += 1
-                    except: pass
-            
-            # Poll voters — رأی‌دهنده‌ها منبع عالی‌ای هستند چون
-            # اکثرشان هیچ‌وقت پیام نمی‌دهند.
-            # ⚠️ نسخه‌ی قبلی `get_poll_voters` را صدا می‌زد که در این
-            # نسخه‌ی Pyrogram وجود ندارد ⇒ AttributeError خاموش.
-            if msg.poll:
-                self.total_api_calls += 1
-                async for uid, user in scrape_api.iter_poll_voters(
-                        self.app, chat_id, msg.id, limit=100,
-                        max_total=500, on_flood=self.handle_flood):
-                    if self._stop_requested:
-                        return
-                    if uid in self.found_users or uid in self._existing_user_ids:
-                        continue
-                    if user is not None:
-                        await self.add_user(user, "poll_voter")
-                        fwd_found += 1
-
-            if msg_count % 200 == 0:
-                self._stage = f"اسکن فروارد: {msg_count} پیام | {fwd_found} جدید"
+        confirmed = 0
+        for i, uid in enumerate(pending):
+            if self._stop_requested:
+                return
+            if await self._oracle.is_member(uid):
+                confirmed += 1
+            if i % 50 == 0:
+                self._stage = f"تأیید: {i:,}/{len(pending):,}"
                 await self._progress()
-            await self.human_sleep(0.03, 0.08)
-        
-        print(f"✅ Forward Scan: {msg_count} پیام | {fwd_found} کاربر جدید", flush=True)
-
+            await self._throttle.wait()
+        print(f"✅ فروارد/ریپلای: {confirmed:,} تأیید شد", flush=True)
 
     async def scrape_mtproto_super_resolve(self, chat_id, user_ids_batch=None):
         """🔥 روش ۱۲: Batch resolve با MTProto raw API
@@ -801,20 +723,18 @@ class AdvancedScraper:
                     return
                 self._checked_members.add(uid)
                 self.total_api_calls += 1
-                try:
-                    mem = await self.app.get_chat_member(chat_id, uid)
-                except FloodWait as e:
-                    await self.handle_flood(e)
+                # از کش عبور می‌کند: کاربری که قبلاً تأیید شده دوباره
+                # پرسیده نمی‌شود.
+                if not await self._oracle.is_member(uid):
                     continue
+                if uid in self.found_users:
+                    continue
+                try:
+                    await self.add_user(await self.app.get_users(uid),
+                                        "mtproto_resolve")
+                    discovered += 1
                 except Exception:
                     continue
-                if not mem:
-                    continue
-                user = getattr(mem, "user", None)
-                if user is None or user.id in self.found_users:
-                    continue
-                await self.add_user(user, "mtproto_resolve")
-                discovered += 1
 
             if discovered and discovered % 20 == 0:
                 self._stage = f"MTProto resolve: {discovered} تایید شده"
@@ -883,14 +803,7 @@ class AdvancedScraper:
             if uid in self.found_users or uid in self._existing_user_ids:
                 continue
             self.total_api_calls += 1
-            try:
-                mem = await self.app.get_chat_member(chat_id, uid)
-            except FloodWait as e:
-                await self.handle_flood(e)
-                continue
-            except Exception:
-                continue
-            if not mem:
+            if not await self._oracle.is_member(uid):
                 continue
             if user is not None:
                 await self.add_user(user, f"{source}_{tag}")
@@ -900,64 +813,63 @@ class AdvancedScraper:
                 except Exception:
                     continue
             discovered += 1
-            await self.human_sleep(0.05, 0.15)
+            await self._throttle.wait()
         return discovered
 
-    async def scrape_deep_history(self, chat_id, limit=10000, batch_size=500):
-        """🆕 روش ۸: اسکن عمیق تاریخچه با offset پویا
-        به جای خطی خوندن، با جهش‌های هوشمند در تاریخچه میگرده
-        تا اعضایی که در بازه‌های زمانی مختلف فعال بودن رو پیدا کنه."""
-        print(f"\n🔍 روش ۸: اسکن عمیق تاریخچه (تا {limit})...", flush=True)
-        self._stage = f"اسکن عمیق تاریخچه"
-        await self._progress(force=True)
-        
-        scanned = 0
-        discovered = 0
-        offsets = list(range(0, limit, batch_size))
+    async def scrape_deep_history(self, chat_id, limit=20000, batch_size=500):
+        """🔍 روش ۸: اسکن تاریخچه فراتر از سقف عبور اول.
 
-        # ⚠️ `_rnd.shuffle(offsets[:10])` یک no-op بود: برش، کپی می‌سازد
-        # و شافل روی کپیِ دورریختنی اعمال می‌شد. اینجا روی خودِ لیست
-        # اعمال می‌شود.
-        import random as _rnd
-        head = offsets[:10]
-        _rnd.shuffle(head)
-        offsets[:10] = head
-        
-        for offset in offsets:
-            if self._stop_requested: return
-            cnt = 0
+        ⚡ این تنها روشی است که مجاز است تاریخچه را دوباره بخواند، و
+        فقط وقتی که عبور واحد به سقفش خورده باشد (یعنی گروه پیام‌های
+        بیشتری از حدی دارد که خواندیم). با پرش‌های offset به بازه‌های
+        زمانی قدیمی‌تر می‌رود.
+
+        استخراج از هر پیام به همان `MessageHarvester` سپرده می‌شود، پس
+        منطق دوباره‌نویسی نشده و ری‌اکشن/نظرسنجی‌های تازه‌کشف‌شده هم
+        جمع می‌شوند.
+        """
+        print(f"\n🔍 روش ۸: اسکن عمیق تاریخچه (تا {limit:,})...", flush=True)
+        self._stage = "اسکن عمیق تاریخچه"
+        await self._progress(force=True)
+
+        harvester = MessageHarvester(
+            sink=self.add_user,
+            existing_ids=self._existing_user_ids,
+            stop_flag=lambda: self._stop_requested,
+        )
+        start = getattr(self, "_harvester", None)
+        # از جایی شروع کن که عبور اول تمام کرد
+        offset = start.messages_seen if start else 0
+        scanned = 0
+
+        while scanned < limit:
+            if self._stop_requested:
+                break
+            got = 0
             try:
-                async for msg in self.app.get_chat_history(chat_id, limit=batch_size, offset=offset):
-                    if self._stop_requested: return
-                    self.total_api_calls += 1
-                    scanned += 1; cnt += 1
-                    
-                    if msg.from_user:
-                        await self.add_user(msg.from_user, f"deep_history")
-                        discovered += 1
-                    if msg.forward_from:
-                        await self.add_user(msg.forward_from, "deep_fwd")
-                    if msg.reply_to_message and msg.reply_to_message.from_user:
-                        await self.add_user(msg.reply_to_message.from_user, "deep_reply")
-                    if msg.entities:
-                        for ent in msg.entities:
-                            if ent.type in _USER_ENTITY_TYPES and ent.user:
-                                await self.add_user(ent.user, "deep_mention")
-                    
-                    await self.human_sleep(0.02, 0.05)
-                
-                if cnt == 0: break  # No more messages
-                
-                if scanned % 1000 == 0:
-                    self._stage = f"اسکن عمیق: {scanned} پیام | {discovered} کاربر جدید"
-                    await self._progress()
-                
-                await self.human_sleep(0.5, 1.2)
+                async for msg in self.app.get_chat_history(
+                        chat_id, limit=batch_size, offset=offset + scanned):
+                    if self._stop_requested:
+                        break
+                    await harvester.consume(msg)
+                    got += 1
+                    self._throttle.on_success()
+                    await self._throttle.wait()
             except FloodWait as e:
                 await self.handle_flood(e)
-            except: pass
-        
-        print(f"✅ Deep History: {scanned} پیام | {discovered} کاربر جدید", flush=True)
+                continue
+            except Exception as e:
+                print(f"⚠️ اسکن عمیق: {type(e).__name__}: {e}", flush=True)
+                break
+
+            if got == 0:
+                break  # تاریخچه تمام شد
+            scanned += got
+            self._stage = f"اسکن عمیق: {scanned:,} پیام | {len(self.found_users):,} کاربر"
+            await self._progress()
+
+        print(f"✅ اسکن عمیق: {harvester.summary()}", flush=True)
+        await self._harvest_collected(chat_id, harvester)
 
     async def _harvest_reactions(self, chat_id, msg, source_prefix):
         """استخراج ری‌اکت‌دهنده‌های یک پیام — مسیر مشترک و درست.
@@ -1004,104 +916,22 @@ class AdvancedScraper:
         return found
 
     async def scrape_reactions_dedicated(self, chat_id, limit=5000):
-        """🆕 روش ۴: اسکن اختصاصی ری‌اکشن‌ها — مستقیم میره سراغ پیام‌هایی که ری‌اکشن دارن
-        و لیست کامل ری‌اکت‌دهنده‌ها رو استخراج میکنه. این روش برای کسایی که فقط
-        ری‌اکشن میدن و هیچوقت پیام نمیدن عالیه."""
-        print(f"\n🔍 روش ۴: اسکن اختصاصی ری‌اکشن ها (تا {limit} پیام)...", flush=True)
-        self._stage = f"در حال اسکن ری‌اکشن ها (تا {limit} پیام)"
-        await self._progress(force=True)
-        msg_count = 0
-        reaction_count = 0
-        try:
-            msg_iter = self.app.get_chat_history(chat_id, limit=limit)
-        except Exception as e:
-            print(f"⚠️ Reactions history error: {e}", flush=True)
-            return
-        
-        async for msg in msg_iter:
-            if self._stop_requested:
-                return
-            self.total_api_calls += 1
-            msg_count += 1
+        """🔍 روش ۴: ری‌اکت‌دهنده‌ها — عالی برای کسانی که هرگز پیام نمی‌دهند.
 
-            if not msg.reactions or not msg.reactions.reactions:
-                if msg_count % 200 == 0:
-                    self._stage = f"اسکن ری‌اکشن: {msg_count} پیام بررسی شد، {reaction_count} ری‌اکت پیدا شد"
-                    await self._progress()
-                await self.human_sleep(0.03, 0.08)
-                continue
-
-            reaction_count += await self._harvest_reactions(
-                chat_id, msg, "ری‌اکشن")
-
-            if msg_count % 100 == 0:
-                self._stage = f"اسکن ری‌اکشن: {msg_count} پیام | {reaction_count} کاربر از ری‌اکشن"
-                await self._progress()
-
-        print(f"✅ اسکن ری‌اکشن: {msg_count} پیام بررسی شد، {reaction_count} کاربر از ری‌اکشن استخراج شد", flush=True)
+        ⚡ عبور واحد شناسه‌ی پیام‌های ری‌اکشن‌دار را جمع می‌کند و سپس
+        فقط همان‌ها را می‌پرسد. نسخه‌ی قبلی برای *هر* پیام بررسی
+        می‌کرد و برای *هر ایموجی* یک درخواست جدا می‌فرستاد.
+        """
+        return await self.scrape_unified_history(chat_id, limit=limit)
 
     async def scrape_channel_posts(self, chat_id, limit=5000):
-        """🆕 روش ۵: اسکن مخصوص کانال — پست‌های کانال، نویسنده‌ها،
-        فرواردها، و ری‌اکشن‌ها رو استخراج میکنه.
-        برای کانال‌هایی که get_chat_members روشون جواب نمیده."""
-        print(f"\n🔍 روش ۵: اسکن پست های کانال (تا {limit} پست)...", flush=True)
-        self._stage = f"در حال اسکن پست های کانال (تا {limit} پست)"
-        await self._progress(force=True)
-        post_count = 0
-        authors_found = 0
-        reactors_found = 0
+        """🔍 روش ۵: اسکن کانال — نویسنده‌ها، فرواردها، ری‌اکشن‌ها.
 
-        try:
-            messages = self.app.get_chat_history(chat_id, limit=limit)
-        except Exception as e:
-            print(f"⚠️ Channel history access error: {e}", flush=True)
-            self._stage = "کانال: دسترسی به تاریخچه نشد"
-            return
-        
-        async for msg in messages:
-            if self._stop_requested:
-                return
-            self.total_api_calls += 1
-            post_count += 1
-
-            # نویسنده پست (برای کانال‌هایی که با اکانت کاربری پست می‌ذارن)
-            if msg.from_user:
-                await self.add_user(msg.from_user, "نویسنده_کانال")
-                authors_found += 1
-
-            # نویسنده hidden (sender_chat برای پست‌های امضا شده با نام کانال)
-            if msg.sender_chat and hasattr(msg.sender_chat, 'id'):
-                # sender_chat خودش یک چت هست، ولی میتونیم ثبتش کنیم
-                pass
-
-            # فروارد از کانال‌های دیگه
-            if msg.forward_from:
-                await self.add_user(msg.forward_from, "فوروارد_کانال")
-            if msg.forward_from_chat:
-                # forward_from_chat خودش چت هست، ولی info مفیده
-                pass
-            if msg.forward_sender_name:
-                # اسم فرستنده بدون اکانت - نمیشه استخراج کرد
-                pass
-
-            # ری‌اکشن‌های پست‌های کانال — منبع عالی برای استخراج
-            if msg.reactions and getattr(msg.reactions, 'reactions', None):
-                reactors_found += await self._harvest_reactions(
-                    chat_id, msg, "ری‌اکشن_کانال")
-
-            # Entity mentions in post captions
-            if msg.entities:
-                for ent in msg.entities:
-                    if ent.type in _USER_ENTITY_TYPES and ent.user:
-                        await self.add_user(ent.user, "منشن_کانال")
-
-            if post_count % 100 == 0:
-                self._stage = f"اسکن کانال: {post_count} پست | {authors_found} نویسنده | {reactors_found} ری‌اکت‌دهنده"
-                await self._progress()
-            await self.human_sleep(0.04, 0.12)
-
-        print(f"✅ اسکن کانال: {post_count} پست | {authors_found} نویسنده | {reactors_found} ری‌اکت‌دهنده", flush=True)
-
+        ⚡ به عبور واحد واگذار شد؛ همان منابع را پوشش می‌دهد بدون
+        خواندن دوباره‌ی تاریخچه.
+        """
+        return await self.scrape_unified_history(
+            chat_id, limit=limit, is_channel=True)
 
     async def scan_all_chats(self, chat_type="all", progress_cb=None, incremental_save_cb=None):
         """🔥 اسکن دسته‌جمعی همه گروه‌ها یا کانال‌ها"""
@@ -1142,6 +972,138 @@ class AdvancedScraper:
         
         return self.found_users
 
+    async def scrape_unified_history(self, chat_id, limit=10000, is_channel=False):
+        """⚡ یک عبور واحد روی تاریخچه، به‌جای شش عبور جداگانه.
+
+        قبلاً شش روش هرکدام کل تاریخچه را از اول می‌خواندند:
+        full_history، join_events، forwarded_messages، deep_history،
+        reactions_dedicated و channel_posts. روی گروهی با ۱۰٬۰۰۰ پیام
+        یعنی **۶۰٬۰۰۰ پیام دانلود** برای داده‌ای که یک بار خواندن کافی
+        بود.
+
+        حالا یک بار می‌خوانیم و همه‌چیز را همزمان برمی‌داریم. ری‌اکشن‌ها
+        و نظرسنجی‌ها درخواست جدا لازم دارند، ولی شناسه‌ی پیام‌هایشان در
+        همین عبور جمع می‌شود تا بدون خواندن دوباره‌ی تاریخچه پردازش
+        شوند.
+
+        صرفه‌جویی: ۸۳٪ کمتر پیام دانلود می‌شود.
+        """
+        t0 = time.time()
+        self._stage = f"اسکن یکپارچه تاریخچه (تا {limit:,} پیام)"
+        await self._progress(force=True)
+
+        harvester = MessageHarvester(
+            sink=self.add_user,
+            existing_ids=self._existing_user_ids,
+            stop_flag=lambda: self._stop_requested,
+        )
+        self._harvester = harvester
+        last_prog = 0.0
+
+        try:
+            async for msg in self.app.get_chat_history(chat_id, limit=limit):
+                if self._stop_requested:
+                    break
+                await harvester.consume(msg)
+                self._throttle.on_success()
+
+                now = time.time()
+                if now - last_prog > 2:
+                    last_prog = now
+                    self.total_api_calls += 1
+                    seen = harvester.messages_seen
+                    spd = int(seen / max(0.001, now - t0) * 60)
+                    self._stage = (f"📜 {seen:,} پیام | "
+                                   f"{len(self.found_users):,} کاربر | ⚡{spd:,}/min")
+                    await self._progress()
+                # تأخیر تطبیقی: در حالت عادی صفر، فقط بعد از فلود بالا می‌رود
+                await self._throttle.wait()
+        except FloodWait as e:
+            await self.handle_flood(e)
+        except Exception as e:
+            print(f"⚠️ اسکن تاریخچه: {type(e).__name__}: {e}", flush=True)
+
+        el = max(0.001, time.time() - t0)
+        print(f"✅ عبور واحد: {harvester.summary()} در {int(el)}s", flush=True)
+
+        # حالا ری‌اکشن‌ها و رأی‌ها — فقط روی پیام‌هایی که واقعاً دارند
+        await self._harvest_collected(chat_id, harvester)
+        return harvester
+
+    async def _harvest_collected(self, chat_id, harvester):
+        """پردازش ری‌اکشن‌ها و نظرسنجی‌های جمع‌آوری‌شده.
+
+        نکته‌ی کلیدی: فقط پیام‌هایی پرسیده می‌شوند که در عبور اول
+        معلوم شد ری‌اکشن/نظرسنجی دارند. نسخه‌ی قبلی برای *هر* پیام
+        بررسی می‌کرد.
+        """
+        rids = harvester.reaction_msg_ids
+        if rids:
+            self._stage = f"استخراج ری‌اکشن از {len(rids):,} پیام"
+            await self._progress(force=True)
+            got = 0
+            for i, mid in enumerate(rids):
+                if self._stop_requested:
+                    break
+                got += await self._harvest_reactions_by_id(chat_id, mid)
+                if i % 25 == 0:
+                    self._stage = f"ری‌اکشن: {i:,}/{len(rids):,} | {got:,} کاربر"
+                    await self._progress()
+            print(f"✅ ری‌اکشن‌ها: {got:,} کاربر از {len(rids):,} پیام", flush=True)
+
+        pids = harvester.poll_msg_ids
+        if pids:
+            self._stage = f"استخراج رأی از {len(pids):,} نظرسنجی"
+            await self._progress(force=True)
+            got = 0
+            for mid in pids:
+                if self._stop_requested:
+                    break
+                self.total_api_calls += 1
+                async for uid, user in scrape_api.iter_poll_voters(
+                        self.app, chat_id, mid, limit=100, max_total=500,
+                        on_flood=self.handle_flood):
+                    if self._stop_requested:
+                        break
+                    if uid in self.found_users or uid in self._existing_user_ids:
+                        continue
+                    if user is not None:
+                        # رأی‌دهنده قطعاً عضو است
+                        self._oracle.mark_member(uid)
+                        await self.add_user(user, "poll_voter")
+                        got += 1
+                await self._throttle.wait()
+            print(f"✅ نظرسنجی‌ها: {got:,} رأی‌دهنده", flush=True)
+
+    async def _harvest_reactions_by_id(self, chat_id, msg_id):
+        """ری‌اکت‌دهنده‌های یک پیام بر اساس شناسه (بدون آبجکت پیام).
+
+        `reaction=None` یعنی «همه‌ی ری‌اکشن‌ها» — یک درخواست به‌جای یک
+        درخواست به ازای هر ایموجی. نسخه‌ی قبلی روی پستی با ۸ ایموجی
+        مختلف، ۸ برابر درخواست می‌فرستاد.
+        """
+        found = 0
+        self.total_api_calls += 1
+        async for uid, user in scrape_api.iter_message_reactors(
+                self.app, chat_id, msg_id, reaction=None,
+                limit=100, max_total=3000, on_flood=self.handle_flood):
+            if self._stop_requested:
+                return found
+            if uid in self.found_users or uid in self._existing_user_ids:
+                continue
+            self._oracle.mark_member(uid)  # ری‌اکت‌دهنده عضو است
+            if user is not None:
+                await self.add_user(user, "ری‌اکشن")
+            else:
+                self.found_users[uid] = {
+                    "user_id": uid, "first_name": str(uid), "last_name": "",
+                    "username": "", "phone": "", "is_premium": "نامشخص",
+                    "source": "ری‌اکشن",
+                }
+            found += 1
+        await self._throttle.wait()
+        return found
+
     async def _run_strategy(self, chat_id, is_channel, deep=False):
         """اجرای مرحله‌بندی‌شده‌ی روش‌های استخراج.
 
@@ -1154,16 +1116,15 @@ class AdvancedScraper:
         بسیار پرهزینه‌ترند و بی‌دلیل اجرا کردنشان یعنی فلود.
         """
         # ── لایه ۱: ارزان و پربازده ───────────────────────────────
-        if is_channel:
-            print("📡 حالت کانال", flush=True)
-            await self._safe(self.scrape_channel_posts(chat_id, limit=10000), "پست کانال")
-            await self._safe(self.scrape_reactions_dedicated(chat_id, limit=5000), "ری‌اکشن")
-            await self._safe(self.scrape_direct_paginated(chat_id), "لیست مستقیم")
-        else:
-            print("⚡ لایه ۱: اسکن پایه", flush=True)
-            await self._safe(self.scrape_direct_paginated(chat_id), "لیست مستقیم")
-            await self._safe(self.scrape_full_history(chat_id, limit=5000), "تاریخچه")
-            await self._safe(self.scrape_join_events(chat_id), "ورود اعضا")
+        # لیست مستقیم اول: نتایجش ذاتاً عضو هستند و کش عضویت را پر
+        # می‌کنند، پس لایه‌های بعدی درخواست تأیید کمتری لازم دارند.
+        await self._safe(self.scrape_direct_paginated(chat_id), "لیست مستقیم")
+        # یک عبور واحد به‌جای شش عبور جداگانه (۸۳٪ کمتر دانلود)
+        await self._safe(
+            self.scrape_unified_history(
+                chat_id, limit=10000 if is_channel else 5000,
+                is_channel=is_channel),
+            "تاریخچه یکپارچه")
 
         base = len(self.found_users)
         expected = getattr(self, "_target_members_count", 0) or 0
@@ -1175,10 +1136,19 @@ class AdvancedScraper:
 
         # ── لایه ۲: جستجوی سمت سرور، همچنان ارزان ────────────────
         print("🔥 لایه ۲: جستجوی عمیق اعضا", flush=True)
+        # صفحه‌بندی سمت سرور — ارزان‌ترین راه برای اعضایی که هیچ پیامی
+        # نداده‌اند، و نتایجش ذاتاً عضو هستند.
         await self._safe(self.scrape_aggressive_pagination(chat_id), "صفحه‌بندی")
-        if not is_channel:
-            await self._safe(self.scrape_deep_history(chat_id, limit=10000), "تاریخچه عمیق")
-        await self._safe(self.scrape_forwarded_messages(chat_id, limit=5000), "فروارد")
+        # تاریخچه‌ی عمیق فقط اگر عبور اول به سقف خورده باشد؛ وگرنه
+        # همان پیام‌ها را دوباره می‌خواند.
+        h = getattr(self, "_harvester", None)
+        capped = h is not None and h.messages_seen >= (5000 if not is_channel else 10000)
+        if not is_channel and capped:
+            await self._safe(
+                self.scrape_deep_history(chat_id, limit=20000), "تاریخچه عمیق")
+        elif not is_channel:
+            print("   ↳ «تاریخچه عمیق» لازم نیست — عبور اول کل تاریخچه را دید",
+                  flush=True)
 
         after2 = len(self.found_users)
         if not deep:
@@ -1187,6 +1157,7 @@ class AdvancedScraper:
 
         # ── لایه ۳: گران، فقط در حالت عمیق ───────────────────────
         print("🕳️ لایه ۳: کشف اعضای مخفی (حالت عمیق)", flush=True)
+        await self._safe(self.scrape_forwarded_messages(chat_id), "تأیید فروارد")
         await self._safe(self.scrape_group_intersection(chat_id), "اشتراک گروهی")
         await self._safe(self.scrape_imported_contacts(chat_id), "مخاطبین")
         await self._safe(self.scrape_global_search(chat_id), "جستجوی سراسری")
@@ -1294,6 +1265,10 @@ class AdvancedScraper:
             total_members = getattr(target_found, 'members_count', 0) or 0
             chat_type_db = "channel" if is_channel else "group"
             self._target_members_count = total_members
+            # کش تأیید عضویت — از اینجا به بعد همه‌ی روش‌ها از آن استفاده
+            # می‌کنند تا یک کاربر دو بار پرسیده نشود.
+            self._oracle = MembershipOracle(
+                self.app, chat_id, on_flood=self.handle_flood)
             print(f"✅ هدف: {target_found.title} | نوع: {chat_type_str} | اعضا: {total_members or '?'}", flush=True)
 
             # 🆕 ذخیره در تاریخچه چت‌های اسکن شده (بدون AI - سرعت)
@@ -1350,6 +1325,19 @@ class AdvancedScraper:
                     progress_pct=pct
                 )
             except: pass
+
+            # گزارش صرفه‌جویی کش عضویت
+            try:
+                st = self._oracle.stats
+                if st["made"] or st["saved"]:
+                    print(f"💾 کش عضویت: {st['made']:,} درخواست انجام شد، "
+                          f"{st['saved']:,} صرفه‌جویی ({st['saved_pct']}%)",
+                          flush=True)
+                if self._throttle.floods:
+                    print(f"⏱️ فلود: {self._throttle.floods} بار | "
+                          f"تأخیر نهایی {self._throttle.delay:.2f}s", flush=True)
+            except Exception:
+                pass
 
             total = time.time() - self.start_time
             pct_str = f" | 📊 {pct}% پیشرفت" if pct > 0 else ""
