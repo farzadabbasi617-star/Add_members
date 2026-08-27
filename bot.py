@@ -5847,8 +5847,6 @@ async def _cb_add_members(c, q, d):
     await show_account_picker(q, "add", "home", f"➕ شروع اضافه کردن اعضا")
     return
 
-@app.on_message(filters.private & filters.user(ADMIN_ID) & (filters.text | filters.document) & ~filters.command("start"))
-
 async def _cb_impl(c, q):
     d = q.data
     handler = _CB.resolve(d)
@@ -5862,6 +5860,16 @@ async def _cb_impl(c, q):
         return
     await handler(c, q, d)
 
+# ⚠️ این دکوریتور اشتباهاً روی `_cb_impl` نشسته بود — تابعی که کال‌بک
+# کوئری می‌گیرد، نه پیام. نتیجه: هر پیام متنی ادمین به `_cb_impl`
+# می‌رسید و روی `q.data` می‌ترکید
+# (AttributeError: 'Message' object has no attribute 'data')،
+# و هندلر واقعیِ مراحل — `steps()` — هرگز ثبت نمی‌شد. یعنی کل جریان
+# گفت‌وگوی متنی ربات (ورود شماره، کد تأیید، رمز دومرحله‌ای، آپلود
+# سشن و ۲۳ مرحله‌ی دیگر) کاملاً از کار افتاده بود.
+@app.on_message(filters.private & filters.user(ADMIN_ID)
+                & (filters.text | filters.document)
+                & ~filters.command("start"))
 async def steps(c, m):
     print("\n" + "="*60, flush=True)
     print("📨 MESSAGE RECEIVED IN steps() HANDLER", flush=True)
