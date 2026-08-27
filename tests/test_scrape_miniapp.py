@@ -123,7 +123,8 @@ def test_live_total_set_so_finished_flag_works():
     پرچم `finished` در داشبورد به `live_total` وابسته است. اگر صفر
     بماند، خلاصه‌ی پایان اسکرپ هرگز نمایش داده نمی‌شود.
     """
-    i = WEB.index('atk_state_ref["live_mode"] = "اسکرپ گروه"')
+    # لنگر: خط live_mode حالا شرطی است (اسکرپ عمیق / اسکرپ گروه)
+    i = WEB.index('atk_state_ref["live_mode"] =')
     window = WEB[i:i + 400]
     assert 'atk_state_ref["live_total"]' in window
 
