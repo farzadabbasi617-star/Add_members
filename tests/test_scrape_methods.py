@@ -82,9 +82,33 @@ def _src(name):
                                             and n.name == name)))
 
 
+TWELVE = [
+    "scrape_direct_paginated", "scrape_full_history", "scrape_join_events",
+    "scrape_reactions_dedicated", "scrape_channel_posts",
+    "scrape_imported_contacts", "scrape_global_search", "scrape_deep_history",
+    "scrape_aggressive_pagination", "scrape_group_intersection",
+    "scrape_forwarded_messages", "scrape_mtproto_super_resolve",
+]
+
+
 def test_all_twelve_methods_still_exist():
-    """مالک ساده‌سازی را رد کرد — هیچ روشی نباید حذف شود."""
-    assert len(NAMES) == 12, f"باید ۱۲ روش باشد، {len(NAMES)} تا هست: {NAMES}"
+    """مالک ساده‌سازی را رد کرد — هیچ روشی نباید حذف شود.
+
+    بهینه‌سازی چند روش را به «عبور واحد» واگذار کرد، ولی خودِ روش‌ها
+    به‌عنوان نقطه‌ی ورود مستقل باقی مانده‌اند.
+    """
+    missing = [m for m in TWELVE if m not in NAMES]
+    assert not missing, f"این روش‌ها حذف شده‌اند: {missing}"
+
+
+def test_delegating_methods_still_reach_a_real_implementation():
+    """واگذاری نباید به حلقه یا بن‌بست ختم شود."""
+    for name in ("scrape_full_history", "scrape_join_events",
+                 "scrape_reactions_dedicated", "scrape_channel_posts"):
+        body = _src(name)
+        assert "scrape_unified_history" in body, f"{name} به جایی وصل نیست"
+        assert "get_chat_history" not in body, (
+            f"{name} نباید مستقیم تاریخچه بخواند — کار عبور واحد است")
 
 
 def test_no_scrape_method_is_dead_code():
@@ -96,7 +120,10 @@ def test_no_scrape_method_is_dead_code():
     reachable = set()
     for caller in ("_run_strategy", "run_full_scrape", "scan_all_chats"):
         reachable |= set(re.findall(r"self\.(scrape_\w+)", _src(caller)))
-    dead = sorted(set(NAMES) - reachable)
+    # روش‌های واگذارشده از طریق عبور واحد پوشش داده می‌شوند
+    delegating = {n for n in NAMES
+                  if "scrape_unified_history" in _src(n) and n != "scrape_unified_history"}
+    dead = sorted(set(NAMES) - reachable - delegating)
     assert not dead, f"این روش‌ها کد مرده‌اند و هرگز اجرا نمی‌شوند: {dead}"
 
 
@@ -166,9 +193,17 @@ def test_no_shuffle_on_a_throwaway_slice():
     )
 
 
-def test_deep_history_actually_shuffles():
+def test_deep_history_starts_where_the_first_pass_stopped():
+    """بازنویسی: به‌جای شافل کردن offsetها، از سقف عبور اول ادامه می‌دهد.
+
+    شافل در نسخه‌ی قبلی هم بی‌اثر بود (روی برش اعمال می‌شد) و هم بی‌فایده:
+    هدف رسیدن به پیام‌های *قدیمی‌تر* است، نه ترتیب تصادفی. حالا offset
+    از جایی شروع می‌شود که عبور واحد تمام کرد، پس هیچ پیامی دو بار
+    دانلود نمی‌شود.
+    """
     body = _src("scrape_deep_history")
-    assert "offsets[:10] = head" in body
+    assert "start.messages_seen if start else 0" in body
+    assert "offset + scanned" in body
 
 
 # ------------------------------------------- کیفیت اجرا
