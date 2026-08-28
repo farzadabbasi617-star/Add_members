@@ -71,13 +71,22 @@ def _init_tables():
     """)
     conn.commit()
     cur.close()
-    conn.close()
 
 
-try:
-    _init_tables()
-except Exception as e:
-    logger.error(f"mod tables init err: {e}")
+_tables_ok = False
+
+
+def _ensure_tables():
+    """ساخت جدول‌ها با اولین استفاده — موقع import پول دیتابیس هنوز آماده نیست"""
+    global _tables_ok
+    if _tables_ok:
+        return
+    try:
+        _init_tables()
+        _tables_ok = True
+        logger.info("mod tables ready")
+    except Exception as e:
+        logger.error(f"mod tables init err: {e}")
 
 
 def _db_load_settings(chat_id: int) -> dict | None:
@@ -86,7 +95,7 @@ def _db_load_settings(chat_id: int) -> dict | None:
         cur = conn.cursor()
         cur.execute("SELECT settings FROM mod_settings_tbl WHERE chat_id = %s", (chat_id,))
         row = cur.fetchone()
-        cur.close(); conn.close()
+        cur.close()
         return row[0] if row else None
     except Exception as e:
         logger.error(f"load settings err: {e}")
@@ -103,8 +112,7 @@ def _db_save_settings(chat_id: int, settings: dict):
             ON CONFLICT (chat_id) DO UPDATE SET settings = EXCLUDED.settings,
                                                    updated_at = EXCLUDED.updated_at
         """, (chat_id, Json_wrap(settings), int(time.time())))
-        conn.commit()
-        cur.close(); conn.close()
+        cur.close()
     except Exception as e:
         logger.error(f"save settings err: {e}")
 
@@ -115,19 +123,21 @@ def Json_wrap(d):
 
 
 def _db_warns(chat_id: int, user_id: int) -> int:
+    _ensure_tables()
     try:
         conn = db.get_conn()
         cur = conn.cursor()
         cur.execute("SELECT count FROM mod_warns_tbl WHERE chat_id=%s AND user_id=%s",
                     (chat_id, user_id))
         row = cur.fetchone()
-        cur.close(); conn.close()
+        cur.close()
         return row[0] or 0
     except Exception:
         return 0
 
 
 def _db_warn_add(chat_id: int, user_id: int, delta: int = 1) -> int:
+    _ensure_tables()
     try:
         conn = db.get_conn()
         cur = conn.cursor()
@@ -140,7 +150,7 @@ def _db_warn_add(chat_id: int, user_id: int, delta: int = 1) -> int:
         """, (chat_id, user_id, max(delta, 0), int(time.time()), delta))
         row = cur.fetchone()
         conn.commit()
-        cur.close(); conn.close()
+        cur.close()
         return row[0] if row else delta
     except Exception as e:
         logger.error(f"warn add err: {e}")
@@ -154,7 +164,7 @@ def _db_warn_reset(chat_id: int, user_id: int):
         cur.execute("DELETE FROM mod_warns_tbl WHERE chat_id=%s AND user_id=%s",
                     (chat_id, user_id))
         conn.commit()
-        cur.close(); conn.close()
+        cur.close()
     except Exception:
         pass
 
@@ -222,6 +232,7 @@ _pending_captcha: dict[tuple, dict] = {}                  # {(chat,user): {...}}
 
 
 def get_group_settings(chat_id: int) -> dict:
+    _ensure_tables()
     s = _settings_cache.get(chat_id)
     if s is None:
         s = dict(DEFAULTS)
