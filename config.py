@@ -48,7 +48,7 @@ API_HASH = os.environ.get("API_HASH", "")
 # Web / Mini App
 # -----------------------------------------------------------------
 PORT = _int("PORT", 10000)
-PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://add-members.onrender.com")
+PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://www.gament1.ir/bot")
 KEEP_ALIVE_INTERVAL = _int("KEEP_ALIVE_INTERVAL", 280)   # ثانیه (Render حدود ۱۵ دقیقه خواب)
 HEALTH_CHECK_INTERVAL = _int("HEALTH_CHECK_INTERVAL", 3600)
 

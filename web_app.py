@@ -1597,6 +1597,38 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
     </main>
 
+        <section id="tab-tools" class="tab-content hidden space-y-4">
+            <!-- اسکن خودکار -->
+            <div class="glass-card p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-sm font-bold text-slate-200">⏱️ اسکن خودکار پس‌زمینه</h3>
+                    <span id="bg-status-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-700 text-slate-300">—</span>
+                </div>
+                <div id="bg-info" class="text-[11px] text-slate-400 leading-5">در حال بارگذاری…</div>
+                <div class="grid grid-cols-4 gap-1.5" id="bg-intervals"></div>
+                <div class="grid grid-cols-2 gap-1.5">
+                    <button onclick="bgAction('toggle')" id="bg-toggle-btn" class="p-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-lg active:scale-95 transition">🟢 روشن کن</button>
+                    <button onclick="loadTools()" class="p-2.5 rounded-xl text-xs font-bold bg-slate-800 border border-slate-700 text-slate-300 active:scale-95 transition">🔄 بروزرسانی</button>
+                </div>
+            </div>
+            <!-- چت‌های اسکن‌شده -->
+            <div class="glass-card p-4 space-y-2">
+                <h3 class="text-sm font-bold text-slate-200">🗂️ چت‌های اسکن‌شده</h3>
+                <div id="chats-list" class="space-y-1.5 max-h-72 overflow-y-auto text-[11px]">
+                    <div class="text-slate-500">در حال بارگذاری…</div>
+                </div>
+            </div>
+            <!-- پاکسازی -->
+            <div class="glass-card p-4 space-y-2">
+                <h3 class="text-sm font-bold text-slate-200">🧹 پاکسازی دیتابیس</h3>
+                <p class="text-[10px] text-slate-400 leading-4">اددشده‌ها حذف می‌شوند ولی دیگر هیچ‌وقت دوباره ادد نمی‌شوند — دیتابیس همیشه سبک و سریع می‌ماند.</p>
+                <div class="grid grid-cols-2 gap-1.5">
+                    <button onclick="cleanupDb('purge_added')" class="p-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-rose-600 to-red-600 text-white shadow-lg active:scale-95 transition">🧹 پاکسازی اددشده‌ها</button>
+                    <button onclick="cleanupDb('purge_dnadd')" class="p-2.5 rounded-xl text-xs font-bold bg-slate-800 border border-slate-700 text-slate-300 active:scale-95 transition">🚫 پاکسازی لیست‌سیاه</button>
+                </div>
+            </div>
+        </section>
+
     <!-- BOTTOM NAVBAR -->
     <nav class="fixed bottom-0 left-0 right-0 glass-card mx-2 mb-2 p-1.5 flex justify-around items-center z-50 shadow-2xl">
         <button onclick="switchTab('dashboard')" id="nav-dashboard" class="flex-1 py-2 text-xs font-bold text-center rounded-xl transition active-tab">
@@ -1610,6 +1642,9 @@ MINI_APP_HTML = """<!DOCTYPE html>
         </button>
         <button onclick="switchTab('accounts')" id="nav-accounts" class="flex-1 py-2 text-xs font-bold text-slate-400 text-center rounded-xl transition">
             📱 اکانت‌ها
+        </button>
+        <button onclick="switchTab('tools')" id="nav-tools" class="flex-1 py-2 text-xs font-bold text-slate-400 text-center rounded-xl transition">
+            🧰 ابزار
         </button>
     </nav>
 
@@ -1643,8 +1678,85 @@ MINI_APP_HTML = """<!DOCTYPE html>
             }
 
             if (tabId === 'dashboard') loadDashboard();
+            if (tabId === 'tools') loadTools();
             if (tabId === 'accounts') loadAccounts();
             if (tabId === 'attack') loadAttackAccounts();
+        }
+
+
+        // ───── 🧰 تب ابزار: اسکن خودکار، چت‌ها، پاکسازی ─────
+        let _bgData = null;
+        async function apiPost(url, body) {
+            const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+            return r.json();
+        }
+        async function loadTools() {
+            try {
+                const [bgr, chr] = await Promise.all([
+                    fetch('api/bg').then(r => r.json()),
+                    fetch('api/chats').then(r => r.json())
+                ]);
+                renderBg(bgr);
+                renderChats(chr);
+            } catch (e) { console.error(e); }
+        }
+        function renderBg(d) {
+            if (!d || !d.ok) return;
+            _bgData = d.bg;
+            const bg = d.bg;
+            const badge = document.getElementById('bg-status-badge');
+            badge.textContent = bg.enabled ? '🟢 روشن' : '🔴 خاموش';
+            badge.className = 'text-[10px] px-2 py-0.5 rounded-full ' + (bg.enabled ? 'bg-emerald-600/30 text-emerald-300' : 'bg-slate-700 text-slate-300');
+            document.getElementById('bg-info').innerHTML =
+                '👤 اکانت: <b class="text-slate-200">' + (bg.account_phone || '—') + '</b><br>' +
+                '🎯 هدف: <b class="text-slate-200">' + ((d.target && d.target.name) || '—') + '</b><br>' +
+                '⏰ هر ' + (bg.interval_minutes || 60) + ' دقیقه · مجموع یافته: ' + (bg.total_found || 0) + '<br>' +
+                '📊 وضعیت: <span class="text-blue-300">' + (bg.status || 'idle') + '</span>';
+            const btn = document.getElementById('bg-toggle-btn');
+            btn.textContent = bg.enabled ? '🔴 خاموش کن' : '🟢 روشن کن';
+            const iv = document.getElementById('bg-intervals');
+            iv.innerHTML = [30, 60, 120, 240].map(m =>
+                '<button onclick="bgInterval(' + m + ')" class="p-2 rounded-xl text-[10px] font-bold ' +
+                (bg.interval_minutes == m ? 'bg-blue-600 text-white' : 'bg-slate-800 border border-slate-700 text-slate-300') +
+                '">' + m + 'د</button>').join('');
+        }
+        async function bgAction(action) {
+            if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+            const body = { action: action };
+            if (_bgData && _bgData.account_phone) body.account = _bgData.account_phone;
+            const r = await apiPost('api/bg', body);
+            if (!r.ok && r.error) alert(r.error);
+            loadTools();
+        }
+        async function bgInterval(mins) {
+            if (tg?.HapticFeedback) tg.HapticFeedback.selectionChanged();
+            const body = { interval: mins };
+            if (_bgData && _bgData.account_phone) body.account = _bgData.account_phone;
+            await apiPost('api/bg', body);
+            loadTools();
+        }
+        function renderChats(d) {
+            if (!d || !d.ok) return;
+            const el = document.getElementById('chats-list');
+            if (!d.chats.length) { el.innerHTML = '<div class="text-slate-500">هنوز چیزی اسکن نشده</div>'; return; }
+            el.innerHTML = d.chats.map(ch =>
+                '<div class="p-2 rounded-xl bg-slate-800/60 border border-slate-700/60">' +
+                '<div class="flex justify-between items-center gap-2">' +
+                '<span class="font-bold text-slate-200 truncate">' + (ch.favorite ? '⭐ ' : '') +
+                (ch.type === 'channel' ? '📡' : '👥') + ' ' + ch.name + '</span>' +
+                '<span class="text-blue-300 whitespace-nowrap">' + ch.pct + '%</span></div>' +
+                '<div class="text-slate-400 mt-1">' + ch.extracted.toLocaleString('fa-IR') + ' / ' +
+                (ch.total ? ch.total.toLocaleString('fa-IR') : '?') + ' 👤' +
+                (ch.category ? ' · 📁 ' + ch.category : '') + '</div></div>').join('');
+        }
+        async function cleanupDb(kind) {
+            if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+            const r = await apiPost('api/cleanup', { kind: kind });
+            if (r.ok) {
+                if (tg?.showAlert) tg.showAlert('🧹 ' + r.removed + ' رکورد پاک شد');
+                else alert('🧹 ' + r.removed + ' رکورد پاک شد');
+                loadTools();
+            } else if (r.error) { alert(r.error); }
         }
 
         function setAttackCategory(cat) {
@@ -1709,7 +1821,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             scrapeMsg('در حال اتصال به تلگرام...', 'info');
 
             try {
-                const res = await fetch('/api/scrape/group', {
+                const res = await fetch('api/scrape/group', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1759,7 +1871,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 
             try {
-                const res = await fetch('/api/scrape/group', {
+                const res = await fetch('api/scrape/group', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ target: target })
@@ -1790,7 +1902,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 
             try {
-                const res = await fetch('/api/add/single', {
+                const res = await fetch('api/add/single', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ phone: account, add_type: addType, mode: addMode })
@@ -1810,7 +1922,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             const btn = document.getElementById('btn-live-probe');
             if (btn) { btn.innerText = '⏳ در حال تست زنده...'; btn.disabled = true; }
             try {
-                const res = await fetch('/api/accounts/probe', { method: 'POST' });
+                const res = await fetch('api/accounts/probe', { method: 'POST' });
                 const data = await res.json();
                 alert(data.message || (data.ok ? 'تست شروع شد' : data.error));
             } catch (e) { alert('خطا: ' + e); }
@@ -1848,7 +1960,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 
             try {
-                const res = await fetch('/api/add/parallel', {
+                const res = await fetch('api/add/parallel', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ mode: selectedParallelSpeed, add_type: addType, phones: phones })
@@ -1868,7 +1980,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             document.getElementById('btn-stop-add').disabled = true;
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('warning');
             try {
-                await fetch('/api/add/stop', { method: 'POST' });
+                await fetch('api/add/stop', { method: 'POST' });
             } catch (e) {
                 alert('خطا در توقف: ' + e);
             }
@@ -1881,7 +1993,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
         async function loadDashboard() {
             try {
-                const res = await fetch('/api/dashboard');
+                const res = await fetch('api/dashboard');
                 const data = await res.json();
                 if (data.ok) {
                     const m = data.metrics;
@@ -2058,7 +2170,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
         async function loadDashAccounts() {
             try {
-                const res = await fetch('/api/accounts');
+                const res = await fetch('api/accounts');
                 const data = await res.json();
                 if (data.ok) {
                     const strip = document.getElementById('dash-accounts-strip');
@@ -2129,7 +2241,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
         async function loadAccounts() {
             try {
-                const res = await fetch('/api/accounts');
+                const res = await fetch('api/accounts');
                 const data = await res.json();
                 if (data.ok) {
                     const list = document.getElementById('accounts-list');
@@ -2311,7 +2423,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
         async function deleteAccount(phone, name) {
             if (!confirm(`اکانت «${name}» (${phone}) حذف شود؟\n\nرکورد دیتابیس و فایل سشن پاک می‌شوند. برای برگرداندن باید دوباره با کد تلگرام لاگین کنی.`)) return;
             try {
-                const res = await fetch('/api/accounts/delete', {
+                const res = await fetch('api/accounts/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ phone })
@@ -2327,7 +2439,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
         async function loadAttackAccounts() {
             try {
-                const res = await fetch('/api/accounts');
+                const res = await fetch('api/accounts');
                 const data = await res.json();
                 if (data.ok) {
                     const sel = document.getElementById('select-single-account');
@@ -2431,7 +2543,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
         async function reset24hLimits() {
             if (!confirm('آیا از ریست کردن شمارنده ادد تمام اکانت‌ها مطمئن هستید؟')) return;
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-            const res = await fetch('/api/accounts/reset', { method: 'POST' });
+            const res = await fetch('api/accounts/reset', { method: 'POST' });
             const data = await res.json();
             alert(data.message || 'انجام شد.');
             loadDashboard();
@@ -2441,7 +2553,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             const val = document.getElementById('input-target').value;
             if (!val) return;
             if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-            const res = await fetch('/api/settings/target', {
+            const res = await fetch('api/settings/target', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ target: val })
@@ -2604,6 +2716,90 @@ def create_web_app(app_bot=None, atk_state=None):
             except Exception:
                 pass
             return web.json_response(d, headers=NO_CACHE)
+
+
+        async def aio_api_bg(request):
+            """وضعیت اسکن خودکار پس‌زمینه."""
+            st = db.get_bg_scan()
+            cfg = db.get_config()
+            return web.json_response({
+                "ok": True,
+                "bg": st,
+                "target": {"id": cfg.get("group_id"), "name": cfg.get("group_name")},
+            }, headers=NO_CACHE)
+
+        async def aio_api_bg_set(request):
+            """تنظیم اسکن خودکار: toggle/enable/disable/interval/account."""
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            st = db.get_bg_scan()
+            cfg = db.get_config()
+            action = body.get("action")
+            enabled = st.get("enabled", False)
+            if action == "toggle":
+                enabled = not enabled
+            elif action == "enable":
+                enabled = True
+            elif action == "disable":
+                enabled = False
+            account = body.get("account") or st.get("account_phone")
+            try:
+                interval = int(body.get("interval") or st.get("interval_minutes", 60))
+            except Exception:
+                interval = 60
+            gid = cfg.get("group_id")
+            if enabled and (not account or not gid):
+                return web.json_response(
+                    {"ok": False, "error": "اول اکانت و گروه هدف لازم است"},
+                    headers=NO_CACHE)
+            db.set_bg_scan(enabled, target_group_id=gid, account_phone=account,
+                           interval_minutes=interval)
+            if account:
+                try:
+                    db.set_owner_phone(account)
+                except Exception:
+                    pass
+            return web.json_response({"ok": True, "bg": db.get_bg_scan()}, headers=NO_CACHE)
+
+        async def aio_api_chats(request):
+            """لیست چت‌های اسکن‌شده + دسته‌بندی‌ها."""
+            chats = db.get_scanned_chats()
+            cats = db.get_all_categories()
+            out = []
+            for ch in chats[:40]:
+                out.append({
+                    "chat_id": ch.get("chat_id"),
+                    "name": ch.get("chat_name"),
+                    "type": ch.get("chat_type"),
+                    "pct": ch.get("progress_pct") or 0,
+                    "extracted": ch.get("extracted_count") or 0,
+                    "total": ch.get("total_members_estimate") or 0,
+                    "category": ch.get("category") or "",
+                    "favorite": bool(ch.get("is_favorite")),
+                    "scans": ch.get("scan_count") or 1,
+                })
+            return web.json_response({"ok": True, "chats": out, "categories": cats},
+                                     headers=NO_CACHE)
+
+        async def aio_api_cleanup(request):
+            """پاکسازی دیتابیس: purge_added / purge_dnadd."""
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            kind = body.get("kind", "purge_added")
+            if kind == "purge_added":
+                n = db.purge_added_users()
+            elif kind == "purge_dnadd":
+                n = db.purge_do_not_add_users()
+            else:
+                return web.json_response({"ok": False, "error": "unknown kind"},
+                                         headers=NO_CACHE)
+            return web.json_response({"ok": True, "removed": n,
+                                      "users": db.count_users()}, headers=NO_CACHE)
+
 
         async def aio_api_loopinfo(request):
             """وضعیت حلقه رویداد و کارهای پس‌زمینه — برای عیب‌یابی."""
@@ -2786,6 +2982,10 @@ def create_web_app(app_bot=None, atk_state=None):
         app.router.add_post('/api/accounts/add/cancel', aio_api_add_account_cancel)
         app.router.add_post('/api/settings/target', aio_api_set_target)
         app.router.add_post('/api/add/stop', aio_api_stop_add)
+        app.router.add_get('/api/bg', aio_api_bg)
+        app.router.add_post('/api/bg', aio_api_bg_set)
+        app.router.add_get('/api/chats', aio_api_chats)
+        app.router.add_post('/api/cleanup', aio_api_cleanup)
         return app
     except ImportError:
         return None

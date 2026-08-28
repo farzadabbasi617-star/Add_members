@@ -1691,7 +1691,7 @@ def main_menu():
     buttons = []
 
     from pyrogram.types import WebAppInfo
-    pub_base = os.environ.get("RENDER_EXTERNAL_URL", "https://add-members.onrender.com")
+    pub_base = os.environ.get("RENDER_EXTERNAL_URL", "https://www.gament1.ir/bot")
     app_url = f"{pub_base}/app?v={int(time.time())}"
     buttons.append([
         InlineKeyboardButton("📱 داشبورد مینی‌اپ", web_app=WebAppInfo(url=app_url))
@@ -1739,6 +1739,17 @@ def main_menu():
         InlineKeyboardButton("♻️ سلامت", callback_data="health_check"),
     ])
     buttons.append([InlineKeyboardButton("💾 بک‌آپ", callback_data="backup_all")])
+
+    # ───────────── ابزار داده: چت‌ها، دسته‌ها، اسکن خودکار، پاکسازی ─────────────
+    buttons.append([
+        InlineKeyboardButton("🗂️ چت‌های اسکن‌شده", callback_data="chats_manager"),
+        InlineKeyboardButton("📂 دسته‌بندی‌ها", callback_data="categories_menu"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("⏱️ اسکن خودکار", callback_data="bg_menu"),
+        InlineKeyboardButton("🔥 اسکن دسته‌ای", callback_data="bulk_scan_menu"),
+        InlineKeyboardButton("🧹 پاکسازی", callback_data="db_cleanup"),
+    ])
 
     return InlineKeyboardMarkup(buttons)
 
@@ -2709,7 +2720,7 @@ async def start_cmd(c, m):
 
 @app.on_message(filters.command(["app", "miniapp", "dashboard"]) & filters.private & filters.user(ADMIN_ID))
 async def miniapp_cmd(c, m):
-    pub_base = os.environ.get("RENDER_EXTERNAL_URL", "https://add-members.onrender.com")
+    pub_base = os.environ.get("RENDER_EXTERNAL_URL", "https://www.gament1.ir/bot")
     app_url = f"{pub_base}/app?v={int(time.time())}"
     from pyrogram.types import WebAppInfo
     await m.reply_text(
@@ -2782,6 +2793,268 @@ async def _cb_attack_from_chat(c, q, d):
     chat_id = int(d.split("_")[3])
     atk_state["target_chat_id"] = chat_id
     await _start_attack_from_chat(q, chat_id)
+    return
+
+
+
+
+# ═══════════════ 🧩 قابلیت‌های برگشتی از نسخهٔ کامل ═══════════════
+# مدیریت چت‌ها + اسکن دسته‌ای + حذف تکراری + فیلتر دسته‌بندی واقعی + اسکن خودکار پس‌زمینه
+# توابع UI از قبل کپی شده بودند ولی دکمه‌ها به هندلر وصل نبودند؛ اینجا همه وصل می‌شوند.
+from db import (get_scanned_chats as _gsc, get_all_categories as _gac,
+                delete_scanned_chat as _dsc, toggle_chat_favorite as _tcf,
+                update_chat_category as _ucc, get_bg_scan as _gbs,
+                set_bg_scan as _sbs, set_owner_phone as _sop)
+
+
+async def _show_chats_manager(q, category=None):
+    """لیست گروه/کانال‌های اسکن‌شده با نوار پیشرفت و دسته‌بندی."""
+    chats = get_scanned_chats()
+    if category:
+        chats = [ch for ch in chats if (ch.get("category") or "") == category]
+    title = f"📂 دسته: {category}" if category else "🗂️ گروه/کانال‌های اسکن‌شده"
+    text = f"<b>{title}</b>\n━━━━━━━━━━━━━━━━━━\n"
+    if not chats:
+        text += "\n⚠️ هنوز چیزی اسکن نشده.\nاز «📥 استخراج ممبر» شروع کن.\n"
+    else:
+        for i, ch in enumerate(chats[:30], 1):
+            icon = _chat_type_icon(ch.get("chat_type", ""))
+            pct = ch.get("progress_pct") or 0
+            extracted = ch.get("extracted_count") or 0
+            total = ch.get("total_members_estimate") or 0
+            fav = "⭐ " if ch.get("is_favorite") else ""
+            cat_tag = f" [{ch.get('category')}]" if ch.get("category") else ""
+            scans = ch.get("scan_count") or 1
+            text += f"\n{i}. {fav}<b>{ch['chat_name'][:35]}</b> {icon}{cat_tag}\n"
+            text += f"   {_progress_bar(pct)} {pct}% | {extracted:,}/{total or '?'} 👤 | 🔄{scans}\n"
+
+    buttons = []
+    for ch in chats[:24]:
+        icon = _chat_type_icon(ch.get("chat_type", ""))
+        name = ch["chat_name"][:20]
+        pct = ch.get("progress_pct") or 0
+        fav = "⭐" if ch.get("is_favorite") else ""
+        cid = ch["chat_id"]
+        buttons.append([
+            InlineKeyboardButton(f"{fav}{icon} {name} ({pct}%)", callback_data=f"chat_select_{cid}"),
+            InlineKeyboardButton("⚙️", callback_data=f"chat_cat_{cid}"),
+        ])
+    nav = []
+    cats = get_all_categories()
+    if not category:
+        nav.append(InlineKeyboardButton("📂 دسته‌بندی‌ها", callback_data="categories_menu"))
+    else:
+        nav.append(InlineKeyboardButton("🔙 همه چت‌ها", callback_data="chats_manager"))
+    for c in cats[:3]:
+        if c != category:
+            nav.append(InlineKeyboardButton(f"📁 {c}", callback_data=f"cat_view_{c}"))
+    buttons.append(nav)
+    buttons.append([
+        InlineKeyboardButton("🔥 اسکن همه گروه‌ها", callback_data="bulk_scan_groups"),
+        InlineKeyboardButton("📡 اسکن همه کانال‌ها", callback_data="bulk_scan_channels"),
+    ])
+    buttons.append([InlineKeyboardButton("🧹 حذف تکراری‌ها", callback_data="dedup_users")])
+    buttons.append(_sub_back_btn())
+    await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+
+
+@_CB.exact("chats_manager")
+async def _cb_chats_manager(c, q, d):
+    await _show_chats_manager(q)
+    return
+
+
+@_CB.exact("bulk_scan_groups")
+async def _cb_bulk_scan_groups(c, q, d):
+    await _start_bulk_scan(q, "groups")
+    return
+
+
+@_CB.exact("bulk_scan_channels")
+async def _cb_bulk_scan_channels(c, q, d):
+    await _start_bulk_scan(q, "channels")
+    return
+
+
+@_CB.exact("bulk_scan_menu")
+async def _cb_bulk_scan_menu(c, q, d):
+    await q.message.edit_text(
+        "🔥 <b>اسکن دسته‌ای</b>\n━━━━━━━━━━━━━━━━━━\n"
+        "همه گروه‌ها یا کانال‌های چت‌لیست اکانت، پشت‌سرهم اسکن می‌شوند\n"
+        "و کاربران‌شان وارد دیتابیس می‌شوند.\n\n"
+        "⚠️ بین اسکن‌ها مکث انسانی هست تا اکانت اذیت نشه.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 اسکن همه گروه‌ها", callback_data="bulk_scan_groups")],
+            [InlineKeyboardButton("📡 اسکن همه کانال‌ها", callback_data="bulk_scan_channels")],
+            [InlineKeyboardButton("🗂️ چت‌های اسکن‌شده", callback_data="chats_manager")],
+            [_sub_back_btn()],
+        ]))
+    return
+
+
+@_CB.exact("dedup_users")
+async def _cb_dedup_users(c, q, d):
+    await _handle_dedup(q)
+    return
+
+
+@_CB.prefix("chat_del_")
+async def _cb_chat_del(c, q, d):
+    chat_id = int(d.split("_")[2])
+    delete_scanned_chat(chat_id)
+    await q.answer("🗑️ چت از تاریخچه حذف شد", show_alert=True)
+    await _show_chats_manager(q)
+    return
+
+
+@_CB.prefix("chat_fav_")
+async def _cb_chat_fav(c, q, d):
+    chat_id = int(d.split("_")[2])
+    toggle_chat_favorite(chat_id)
+    await _handle_chat_select(q, chat_id)
+    return
+
+
+@_CB.prefix("cat_view_")
+async def _cb_cat_view(c, q, d):
+    cat = d[len("cat_view_"):]
+    await _show_chats_manager(q, category=cat)
+    return
+
+
+@_CB.prefix("cat_apply_")
+async def _cb_cat_apply(c, q, d):
+    parts = d.split("_")
+    chat_id = int(parts[2])
+    new_cat = "_".join(parts[3:])
+    update_chat_category(chat_id, new_cat if new_cat != "none" else "")
+    await q.answer(f"✅ دسته شد: {new_cat}" if new_cat != "none" else "✅ دسته حذف شد", show_alert=True)
+    await _handle_chat_select(q, chat_id)
+    return
+
+
+# ───────────── اسکن خودکار پس‌زمینه ─────────────
+
+@_CB.exact("bg_menu")
+async def _cb_bg_menu(c, q, d):
+    st = get_bg_scan()
+    accs = list_saved_accounts()
+    cfg = _db_get_config()
+    icon = "🟢" if st.get("enabled") else "🔴"
+    text = f"⏱️ <b>اسکن خودکار پس‌زمینه</b>\n\n"
+    text += f"وضعیت: {icon} {'روشن' if st.get('enabled') else 'خاموش'}\n"
+    text += f"👤 اکانت: <code>{st.get('account_phone') or '—'}</code>\n"
+    text += f"👥 هدف: {cfg.get('group_name') or '—'}\n"
+    text += f"⏰ فاصله: هر {st.get('interval_minutes', 60)} دقیقه\n"
+    text += f"🕐 آخرین اجرا: {'ندارد' if not st.get('last_run') else time.strftime('%Y-%m-%d %H:%M', time.localtime(st['last_run']))}\n"
+    text += f"👥 مجموع یافته‌ها: {st.get('total_found', 0)}\n"
+    text += f"📊 وضعیت: {st.get('status', 'idle')}\n\n"
+    text += "♻️ بین اکانت‌های آزاد می‌چرخد؛ اکانت انتخابی فقط اولویت است."
+    buttons = []
+    for phone in (accs or {}).keys():
+        sel = "✅" if st.get("account_phone") == phone else "⚪"
+        buttons.append([InlineKeyboardButton(f"{sel} اکانت {phone}", callback_data=f"bg_acc_{phone}")])
+    if st.get("account_phone") and cfg.get("group_id"):
+        buttons.append([InlineKeyboardButton(
+            f"{'🔴 خاموش' if st.get('enabled') else '🟢 روشن'} کن",
+            callback_data="bg_toggle")])
+    buttons.append([
+        InlineKeyboardButton("⏱ ۳۰د", callback_data="bg_iv_30"),
+        InlineKeyboardButton("⏱ ۱س", callback_data="bg_iv_60"),
+        InlineKeyboardButton("⏱ ۲س", callback_data="bg_iv_120"),
+        InlineKeyboardButton("⏱ ۴س", callback_data="bg_iv_240"),
+    ])
+    buttons.append([_sub_back_btn()])
+    await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    return
+
+
+@_CB.prefix("bg_acc_")
+async def _cb_bg_acc(c, q, d):
+    phone = d[len("bg_acc_"):]
+    cfg = _db_get_config()
+    set_bg_scan(True, target_group_id=cfg.get("group_id"), account_phone=phone,
+                interval_minutes=get_bg_scan().get("interval_minutes", 60))
+    set_owner_phone(phone)
+    await q.answer(f"اکانت {phone} برای اسکن خودکار انتخاب شد", show_alert=True)
+    await _cb_bg_menu(c, q, "bg_menu")
+    return
+
+
+@_CB.exact("bg_toggle")
+async def _cb_bg_toggle(c, q, d):
+    st = get_bg_scan()
+    if not st.get("account_phone"):
+        await q.answer("اول یک اکانت انتخاب کن.", show_alert=True)
+        return
+    cfg = _db_get_config()
+    if not cfg.get("group_id"):
+        await q.answer("اول از تنظیمات، گروه هدف را انتخاب کن.", show_alert=True)
+        return
+    set_bg_scan(not st.get("enabled"), target_group_id=cfg.get("group_id"),
+                account_phone=st.get("account_phone"),
+                interval_minutes=st.get("interval_minutes", 60))
+    await q.answer(f"اسکن خودکار {'روشن' if not st.get('enabled') else 'خاموش'} شد", show_alert=True)
+    await _cb_bg_menu(c, q, "bg_menu")
+    return
+
+
+@_CB.prefix("bg_iv_")
+async def _cb_bg_iv(c, q, d):
+    mins = int(d.split("_")[2])
+    st = get_bg_scan()
+    set_bg_scan(st.get("enabled", False), target_group_id=st.get("target_group_id"),
+                account_phone=st.get("account_phone"), interval_minutes=mins)
+    await q.answer(f"فاصله اسکن: هر {mins} دقیقه", show_alert=False)
+    await _cb_bg_menu(c, q, "bg_menu")
+    return
+
+
+# ───────────── پاکسازی دیتابیس ─────────────
+
+@_CB.exact("db_cleanup")
+async def _cb_db_cleanup(c, q, d):
+    total = _db_count_users()
+    try:
+        added_cnt = _db_count_added()
+    except Exception:
+        added_cnt = 0
+    text = ("🧹 <b>پاکسازی دیتابیس</b>\n━━━━━━━━━━━━━━━━━━\n"
+            f"👥 کاربران ذخیره‌شده: <b>{total:,}</b>\n"
+            f"✅ اددشده‌ها (در تاریخچه): <b>{added_cnt:,}</b>\n\n"
+            "پاکسازی یعنی: رکورد کامل کسانی که ادد شدند (یا لیست‌سیاه شدند) حذف می‌شود؛\n"
+            "خودشان در تاریخچه/لیست‌سیاه می‌مانند و <b>هرگز دوباره ادد نمی‌شوند</b>.\n"
+            "نتیجه: دیتابیس سبک و اددِ بعدی سریع‌تر.")
+    await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧹 پاکسازی اددشده‌ها", callback_data="purge_added")],
+        [InlineKeyboardButton("🚫 پاکسازی لیست‌سیاه از مخاطبین", callback_data="purge_dnadd")],
+        [InlineKeyboardButton("♻️ حذف تکراری‌های دقیق", callback_data="dedup_users")],
+        [_sub_back_btn()],
+    ]))
+    return
+
+
+@_CB.exact("purge_added")
+async def _cb_purge_added(c, q, d):
+    n = db.purge_added_users()
+    await q.answer(f"🧹 {n:,} رکورد پاک شد", show_alert=True)
+    await _cb_db_cleanup(c, q, "db_cleanup")
+    return
+
+
+@_CB.exact("purge_dnadd")
+async def _cb_purge_dnadd(c, q, d):
+    n = db.purge_do_not_add_users()
+    await q.answer(f"🚫 {n:,} رکورد پاک شد", show_alert=True)
+    await _cb_db_cleanup(c, q, "db_cleanup")
+    return
+
+
+@_CB.prefix("cat_set_")
+async def _cb_cat_set(c, q, d):
+    parts = d.split("_", 2)
+    chat_id = int(parts[2])
+    await _handle_chat_category_prompt(q, chat_id)
     return
 
 
@@ -7985,6 +8258,13 @@ if __name__ == "__main__":
     Thread(target=keep_awake_loop, daemon=True).start()
     # Start auto-reset background thread
     Thread(target=auto_reset_adder_limits_thread, daemon=True).start()
+    # 🆕 حلقه اسکن خودکار پس‌زمینه — از منوی «⏱️ اسکن خودکار» کنترل می‌شود
+    try:
+        import bg_scraper as _bg
+        _bg.start_in_background(app, ADMIN_ID)
+        print("✅ Background auto-scraper loop registered", flush=True)
+    except Exception as _bge:
+        print(f"⚠️ bg_scraper error: {_bge}", flush=True)
     print("✅ Auto-reset thread started (resets every 24h)", flush=True)
     
     # Run with retry on FloodWait

@@ -739,6 +739,7 @@ def mark_added(group_id, user_id, phone):
             ON CONFLICT (group_id, user_id) DO NOTHING
         """, (int(group_id), int(user_id), int(time.time()), phone or ""))
         cur.close()
+        _maybe_autopurge()
     except Exception as e:
         logger.error(f"mark_added err: {e}")
 @db_retry()
@@ -1366,3 +1367,59 @@ def delete_lead(lead_id):
         logger.error(f"delete_lead err: {e}")
         return False
 
+
+
+# ═══════════════ 🧹 پاکسازی خودکار دیتابیس ═══════════════
+# رکورد کاملِ اددشده‌ها لازم نیست؛ دفتر کلِ added_history_tbl و do_not_add_tbl
+# جلوی ادد دوباره را می‌گیرند (bulk_save_users همان‌ها را فیلتر می‌کند).
+_ADD_PURGE_EVERY = 300
+_add_purge_state = {"n": 0}
+
+
+def purge_added_users() -> int:
+    """حذف رکورد کامل کاربران اددشده؛ تاریخچه در added_history_tbl می‌ماند."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM scraped_users
+            WHERE user_id IN (SELECT DISTINCT user_id FROM added_history_tbl)
+        """)
+        n = cur.rowcount or 0
+        conn.commit()
+        cur.close()
+        conn.close()
+        return int(n)
+    except Exception as e:
+        logger.error(f"purge_added_users err: {e}")
+        return 0
+
+
+def purge_do_not_add_users() -> int:
+    """حذف رکورد کامل لیست‌سیاه‌ها؛ خودشان در do_not_add_tbl می‌مانند."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM scraped_users
+            WHERE user_id IN (SELECT DISTINCT user_id FROM do_not_add_tbl)
+        """)
+        n = cur.rowcount or 0
+        conn.commit()
+        cur.close()
+        conn.close()
+        return int(n)
+    except Exception as e:
+        logger.error(f"purge_do_not_add_users err: {e}")
+        return 0
+
+
+def _maybe_autopurge():
+    """هر ۳۰۰ ادد، یک پاکسازی خودکارِ سبک."""
+    try:
+        _add_purge_state["n"] += 1
+        if _add_purge_state["n"] >= _ADD_PURGE_EVERY:
+            _add_purge_state["n"] = 0
+            purge_added_users()
+    except Exception:
+        pass

@@ -8,3 +8,10 @@ __pycache__/
 sessions/
 logs/
 .env
+
+# runtime data — حساس، هرگز کامیت نشود
+saved_accounts.json
+last_auto_reset.txt
+*.session
+*.session-*
+logs/
