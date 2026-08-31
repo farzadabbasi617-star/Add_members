@@ -58,6 +58,7 @@ from db import (
     delete_scanned_chat, toggle_chat_favorite, upsert_scanned_chat,
 )
 import account_state
+import content_auto  # ماژول تولید محتوا و انتشار خودکار
 
 # ⚙️ پیکربندی مرکزی — همه مقادیر از config.py (env / .env)
 from config import (
@@ -1751,6 +1752,9 @@ def main_menu():
         InlineKeyboardButton("🧹 پاکسازی", callback_data="db_cleanup"),
     ])
 
+    # ───────────── 🤖 تولید محتوا و انتشار خودکار ─────────────
+    buttons.append([InlineKeyboardButton("🤖 تولید محتوا و انتشار", callback_data="content_menu")])
+
     return InlineKeyboardMarkup(buttons)
 
 
@@ -2763,6 +2767,9 @@ async def cb(c, q):
 # بدنهٔ هر هندلر عیناً همان کدی است که قبلاً داخل زنجیرهٔ ۱۲۸ شرطیِ
 # _cb_impl قرار داشت؛ فقط «انتخاب هندلر» از «اجرای هندلر» جدا شده است.
 _CB = CallbackRouter()
+
+# ── ثبت ماژول تولید محتوا و انتشار خودکار (content_auto) ──
+content_auto.register(app, _CB)
 
 
 @_CB.exact("noop")
@@ -8262,6 +8269,13 @@ if __name__ == "__main__":
     try:
         import bg_scraper as _bg
         _bg.start_in_background(app, ADMIN_ID)
+        # 🆕 حلقهٔ انتشار خودکار محتوا (content_auto)
+        try:
+            import content_auto as _ca
+            _ca.start_in_background(app)
+            print("✅ Content auto-publish loop registered", flush=True)
+        except Exception as _cae:
+            print(f"⚠️ content_auto background error: {_cae}", flush=True)
         print("✅ Background auto-scraper loop registered", flush=True)
     except Exception as _bge:
         print(f"⚠️ bg_scraper error: {_bge}", flush=True)
