@@ -187,9 +187,25 @@ def register(app, _CB):
             [_b("🎲 تولید محتوای تصادفی", "content_gen")],
             [_b("✍️ موضوع دلخواه", "content_gen_custom"), _b("🔁 تولید دوباره", "content_regenerate")],
             [_b("📤 انتشار به کانال", "content_publish")],
-            [_b("⚙️ تنظیمات", "content_settings")],
+            [_b("🛠️ موضوع‌های آماده", "content_topics"), _b("⚙️ تنظیمات", "content_settings")],
             [_b("🏠 منوی اصلی", "home")],
         ]
+
+    def _topics_menu():
+        rows = []
+        for i, t in enumerate(_TOPIC_POOL[:4]):
+            rows.append([_b(t, f"content_gen_topic_{i}")])
+        # بقیه در دکمهٔ «بیشتر»
+        rows.append([_b("بیشتر ⬇️", "content_topics_more")])
+        rows.append([_b("🔙 بازگشت", "content_menu")])
+        return InlineKeyboardMarkup(rows)
+
+    def _topics_more_menu():
+        rows = []
+        for i, t in enumerate(_TOPIC_POOL[4:], start=4):
+            rows.append([_b(t, f"content_gen_topic_{i}")])
+        rows.append([_b("🔙 بازگشت", "content_topics")])
+        return InlineKeyboardMarkup(rows)
 
     def _menu():
         return InlineKeyboardMarkup(_menu_rows())
@@ -231,7 +247,7 @@ def register(app, _CB):
                f"━━━━━━━━━━━━━━━━━━\n{content['text']}\n")
         await q.message.edit_text(txt, reply_markup=_edit_kb(), disable_web_page_preview=True)
 
-    @_CB.prefix("content_topic_")
+    @_CB.prefix("content_gen_topic_")
     async def _gen_topic(c, q):
         idx = q.data.split("_")[-1]
         try:
@@ -244,6 +260,14 @@ def register(app, _CB):
         txt = (f"✍️ <b>موضوع:</b> {content['topic']}\n"
                f"━━━━━━━━━━━━━━━━━━\n{content['text']}\n")
         await q.message.edit_text(txt, reply_markup=_edit_kb(), disable_web_page_preview=True)
+
+    @_CB.exact("content_topics")
+    async def _topics(c, q):
+        await q.message.edit_text("🛠️ <b>موضوع‌های آماده</b>\n\nیکی را انتخاب کن:",
+                                  reply_markup=_topics_menu())
+    @_CB.exact("content_topics_more")
+    async def _topics_more(c, q):
+        await q.message.edit_text("🛠️ <b>موضوع‌های بیشتر</b>", reply_markup=_topics_more_menu())
 
     @_CB.exact("content_gen_custom")
     async def _gen_custom(c, q):
