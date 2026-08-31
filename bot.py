@@ -59,6 +59,7 @@ from db import (
 )
 import account_state
 import content_auto  # ماژول تولید محتوا و انتشار خودکار
+import news_review  # بازبینی خبرهای سایت
 
 # ⚙️ پیکربندی مرکزی — همه مقادیر از config.py (env / .env)
 from config import (
@@ -2770,6 +2771,7 @@ _CB = CallbackRouter()
 
 # ── ثبت ماژول تولید محتوا و انتشار خودکار (content_auto) ──
 content_auto.register(app, _CB)
+news_review.register(app, _CB)
 
 
 @_CB.exact("noop")
