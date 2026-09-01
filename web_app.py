@@ -2373,7 +2373,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             if (!phone) { addAccMsg('شماره را وارد کن.', 'err'); return; }
             addAccMsg('در حال ارسال کد...', 'info');
             try {
-                const d = await addAccPost('/api/accounts/add', { phone: phone });
+                const d = await addAccPost('api/accounts/add', { phone: phone });
                 addAccMsg(d.message || '', d.ok ? 'ok' : 'err');
                 if (d.ok) { addAccPhone = phone; addAccStep(d.needs || 'code'); }
             } catch (e) { addAccMsg('خطای ارتباط: ' + e, 'err'); }
@@ -2384,7 +2384,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             if (!code) { addAccMsg('کد را وارد کن.', 'err'); return; }
             addAccMsg('در حال بررسی کد...', 'info');
             try {
-                const d = await addAccPost('/api/accounts/add/code', { phone: addAccPhone, code: code });
+                const d = await addAccPost('api/accounts/add/code', { phone: addAccPhone, code: code });
                 addAccMsg(d.message || '', d.ok ? 'ok' : 'err');
                 if (d.ok && d.needs === 'password') { addAccStep('password'); return; }
                 if (d.ok) { addAccDone(); }
@@ -2396,7 +2396,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
             if (!pwd) { addAccMsg('رمز را وارد کن.', 'err'); return; }
             addAccMsg('در حال ورود...', 'info');
             try {
-                const d = await addAccPost('/api/accounts/add/code', { phone: addAccPhone, password: pwd });
+                const d = await addAccPost('api/accounts/add/code', { phone: addAccPhone, password: pwd });
                 addAccMsg(d.message || '', d.ok ? 'ok' : 'err');
                 if (d.ok) { addAccDone(); }
             } catch (e) { addAccMsg('خطای ارتباط: ' + e, 'err'); }
@@ -2414,7 +2414,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
         async function addAccountCancel() {
             if (addAccPhone) {
-                try { await addAccPost('/api/accounts/add/cancel', { phone: addAccPhone }); } catch (e) {}
+                try { await addAccPost('api/accounts/add/cancel', { phone: addAccPhone }); } catch (e) {}
             }
             document.getElementById('add-acc-panel').classList.add('hidden');
             addAccReset();
