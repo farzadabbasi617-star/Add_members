@@ -1971,6 +1971,9 @@ async def bot_promoted_to_admin(c, m):
     # Check if bot was promoted
     me = await c.get_me()
     
+    # پیام‌های سرویس بدون اطلاعات ممبر (ترک/کیک/...) — بدون گارد کرش می‌کرد
+    if not m.new_chat_member or not getattr(m.new_chat_member, "user", None):
+        return
     if m.new_chat_member.user.id != me.id:
         return  # Not the bot
     

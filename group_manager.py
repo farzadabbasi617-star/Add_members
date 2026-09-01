@@ -1182,6 +1182,8 @@ def register_group_handlers(app: Client, admin_id: int):
          "resetwarn", "purge", "del", "promote", "demote", "lock", "unlock",
          "lockdown", "report", "admin", "help", "cancellog", "cancelwelcome", "cancelbl"], prefixes="/!"), group=5)
     async def _on_panel_input(c: Client, m: Message):
+        if not m.from_user:
+            return  # پیام ناشناس/کانال — فرستنده ندارد
         if not await is_admin(c, m.chat.id, m.from_user.id):
             return
         s = get_group_settings(m.chat.id)
